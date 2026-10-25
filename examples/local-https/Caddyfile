@@ -4,6 +4,8 @@
 # public certificate, open a router port, or redirect the existing HTTP site.
 {
     auto_https disable_redirects
+    # Direct-IP HTTPS clients often omit TLS SNI. Serve the LAN IP cert anyway.
+    default_sni {$ALTKEEPER_LAN_IP}
     admin off
 }
 
