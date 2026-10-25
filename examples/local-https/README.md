@@ -32,6 +32,20 @@ curl -sk -o /dev/null -w 'HTTPS code: %{http_code}\n' https://192.168.0.62:8788/
 ```
 
 HTTP status 401 is normal before entering AltKeeper's existing web PIN.
+If curl connects to port 8788 but fails with `tlsv1 alert internal error`
+(before any HTTP status), check that the Caddyfile's global block includes
+`default_sni {$ALTKEEPER_LAN_IP}`. Bare IP connections may omit TLS SNI,
+so Caddy must use its local IP certificate as the fallback. To verify,
+run `curl -vk https://192.168.0.62:8788/ -o /dev/null`. A returned
+**401** means TLS and reverse proxy are responding; the AltKeeper web PIN
+is still required. A returned **502** means TLS worked but upstream proxy
+connectivity needs checking. The `-k` flag is for diagnosis only and does
+not mean the iPhone trusts the local certificate.
+
+If you edited a Caddyfile that is bind-mounted into Docker, recreate only
+the HTTPS service with
+`docker compose -f compose.yml up -d --force-recreate altkeeper-https`
+so the container receives the new file. Do not erase `caddy-data`.
 The Caddy `caddy-data` volume **must stay persistent** so the CA
 and certificates are not replaced on each restart. Do not share
 `caddy-data/caddy/pki/authorities/local/root.key`.
