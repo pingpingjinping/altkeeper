@@ -30,6 +30,7 @@ mod install_archive;
 mod log;
 mod phone;
 mod profile;
+mod renewal_wait;
 mod terminal;
 mod web;
 
@@ -130,13 +131,20 @@ async fn open_phone(
     addr: Option<SocketAddr>,
     say: &mut dyn FnMut(&str),
 ) -> Result<phone::PhoneLink, String> {
+    open_phone_with_route(addr, say).await.map(|(_, link)| link)
+}
+
+async fn open_phone_with_route(
+    addr: Option<SocketAddr>,
+    say: &mut dyn FnMut(&str),
+) -> Result<(phone::Via, phone::PhoneLink), String> {
     let (found, link) = phone::connect_auto(addr, PAIRING_FILE, &mut *say).await?;
     if found == phone::Via::Usb {
         say(crate::tr!("Collegato via USB", "Connected via USB"));
     } else if addr.map(phone::Via::Wifi) != Some(found) {
         say(&crate::tr!(format!("Telefono trovato a {found}"), format!("Found phone at {found}")));
     }
-    Ok(link)
+    Ok((found, link))
 }
 
 /// Legge e interpreta tutti i profili presenti sul telefono.
@@ -233,13 +241,16 @@ async fn cmd_renew(
     min_days: i64,
     bundle_filter: Option<&str>,
     installed_only: bool,
+    wait_control: Option<&renewal_wait::Control>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let acc = apple::load_account(Path::new("."))?;
     let team_id = acc.team_id.clone().ok_or("team not saved: sign in again")?;
 
     say("Connecting to the phone...");
-    let mut link = open_phone(addr, &mut *say).await?;
+    let (route, mut link) = open_phone_with_route(addr, &mut *say).await?;
+    let standalone_control = renewal_wait::Control::default();
+    let wait_control = wait_control.unwrap_or(&standalone_control);
     let profiles = phone_profiles(&mut link).await?;
     let mine: Vec<&profile::PhoneProfile> = profiles
         .iter()
@@ -364,15 +375,31 @@ async fn cmd_renew(
         let new = apple::download_profile(&mut sess, &team, app).await?;
         say(&crate::tr!(format!("      nuovo profilo valido fino al {}", new.date_expire.to_xml_format()), format!("      new profile valid until {}", new.date_expire.to_xml_format())));
         let bytes: Vec<u8> = new.encoded_profile.into();
-        phone::with_timeout(
-            "Profile install",
-            std::time::Duration::from_secs(60),
-            async { link.install_profile(bytes).await },
-        )
-        .await?;
+        let expected = profile::parse(&bytes)
+            .ok_or("Downloaded provisioning profile cannot be verified.")?;
+        if expected.team_id.as_deref() != Some(team_id.as_str())
+            || expected.bundle_id.as_deref() != Some(bundle)
+        {
+            return Err("Downloaded provisioning profile does not match the requested team and app.".into());
+        }
+        let completion = renewal_wait::await_install(
+            link.install_profile(bytes),
+            || phone::probe_profile(route, PAIRING_FILE, &expected.uuid, &team_id),
+            wait_control,
+            renewal_wait::Policy::default(),
+            || say("WAITING_FOR_PHONE No install response after 60 seconds. Keeping the request pending; unlock the iPhone and keep it awake. Waiting stops if the phone disconnects."),
+        ).await.map_err(|e| format!("Profile install: {e}"))?;
         say("      installed on the phone");
         say(&format!("RENEWED {bundle}"));
         done += 1;
+        if completion == renewal_wait::Completion::Verified {
+            say("      New profile verified on the iPhone despite a missing install response.");
+            // The old stream still has an unanswered request. Never issue the
+            // next install or CopyAll on it, where a late reply could be mistaken
+            // for the next command's response.
+            drop(link);
+            link = phone::reconnect(route, PAIRING_FILE).await?;
+        }
     }
 
     if !dry_run && done > 0 {
@@ -568,6 +595,7 @@ async fn run() -> Result<(), String> {
                 min_days,
                 bundle.as_deref(),
                 installed_only,
+                None,
                 &mut |s| println!("{s}"),
             )
             .await

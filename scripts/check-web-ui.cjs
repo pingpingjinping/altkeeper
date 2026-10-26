@@ -65,6 +65,24 @@ assert(html.includes('rel="icon"'));
 assert(html.includes('"/api/discord/test"'));
 console.log("Localized dashboard JavaScript syntax, actions, labels and layout OK");
 
+// Waiting must be distinct from failure, remain understandable in both UI
+// languages, and expose an authenticated cancellation action.
+{
+  const fn = embedded[1].match(/function jobMessage\([^)]*\) \{[\s\S]*?\r?\n\}/);
+  assert(fn, "missing job status formatter");
+  const context = vm.createContext({ t: x => x });
+  vm.runInContext(fn[0], context);
+  assert.match(vm.runInContext('jobMessage({running:true,waiting_for_phone:true})', context), /Waiting for iPhone response/);
+  assert.equal(vm.runInContext('jobMessage({running:true,waiting_for_phone:true,cancel_requested:true})', context), "Stopping the wait…");
+  assert.match(vm.runInContext('jobMessage({running:false,canceled:true,ok:false})', context), /Waiting canceled/);
+  assert.equal(vm.runInContext('jobMessage({running:false,ok:true})', context), "Done.");
+  assert.match(vm.runInContext('jobMessage({running:false,ok:false})', context), /did not complete successfully/);
+  assert(html.includes('id="btn-cancel-wait"'));
+  assert(html.includes('"/api/renew/cancel-wait"'));
+  assert(html.includes('"대기 취소"'));
+  console.log("Pending iPhone response, cancellation and completion UI OK");
+}
+
 // Installation progress stays next to the IPA controls, including its final
 // failure/success. A later renewal moves the same panel back without copying
 // log nodes or losing the reader's scroll position.

@@ -543,6 +543,47 @@ pub async fn with_timeout<T>(
     }
 }
 
+/// Reconnect only to the transport that was authenticated for this renewal.
+/// Probes must not scan for unrelated phones or change saved address priority.
+pub async fn reconnect(via: Via, pairing_path: &str) -> Result<PhoneLink, String> {
+    with_timeout("iPhone reconnection", Duration::from_secs(12), async {
+        match via {
+            Via::Wifi(addr) => connect(addr, pairing_path).await,
+            Via::Usb => connect_usb(&mut |_| {}).await?
+                .ok_or_else(|| "iPhone USB connection was lost.".into()),
+        }
+    }).await
+}
+
+/// Check reachability and look for the exact downloaded UUID over a separate
+/// connection. A locked/slow service is not the same as an offline phone.
+pub async fn probe_profile(
+    via: Via, pairing_path: &str, uuid: &str, team: &str,
+) -> crate::renewal_wait::Probe {
+    use crate::renewal_wait::Probe;
+    if let Via::Wifi(addr) = via {
+        if !matches!(tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr)).await, Ok(Ok(_))) {
+            return Probe::Disconnected(format!("{addr} is no longer reachable"));
+        }
+    }
+    let mut link = match reconnect(via, pairing_path).await {
+        Ok(link) => link,
+        Err(error) => return match via {
+            Via::Wifi(_) => Probe::Connected,
+            Via::Usb => Probe::Disconnected(error),
+        },
+    };
+    match with_timeout("Profile verification", Duration::from_secs(10), link.profiles()).await {
+        Ok(raw) if contains_profile(&raw, uuid, team) => Probe::Installed,
+        _ => Probe::Connected,
+    }
+}
+
+fn contains_profile(raw: &[Vec<u8>], uuid: &str, team: &str) -> bool {
+    !uuid.is_empty() && raw.iter().filter_map(|bytes| crate::profile::parse(bytes))
+        .any(|p| p.uuid.eq_ignore_ascii_case(uuid) && p.team_id.as_deref() == Some(team))
+}
+
 /// L'unico demone mDNS del processo: ricerca dell'iPhone e annuncio di AltServer lo condividono
 /// (due demoni nello stesso processo si contendono la porta 5353 e le risposte si perdono).
 pub fn mdns() -> Option<&'static mdns_sd::ServiceDaemon> {
@@ -834,6 +875,28 @@ pub async fn pair_usb(out: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_requires_the_exact_new_uuid_and_team() {
+        let raw = vec![br#"<?xml version="1.0"?><plist version="1.0"><dict>
+            <key>UUID</key><string>NEW-PROFILE</string>
+            <key>TeamIdentifier</key><array><string>TEAM</string></array>
+            </dict></plist>"#.to_vec()];
+        assert!(contains_profile(&raw, "new-profile", "TEAM"));
+        assert!(!contains_profile(&raw, "OLD-PROFILE", "TEAM"));
+        assert!(!contains_profile(&raw, "NEW-PROFILE", "OTHERTEAM"));
+        assert!(!contains_profile(&raw, "", "TEAM"));
+        assert!(!contains_profile(&[b"invalid profile".to_vec()], "NEW-PROFILE", "TEAM"));
+    }
+
+    #[tokio::test]
+    async fn offline_endpoint_is_a_connection_failure_not_an_unlock_wait() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let result = probe_profile(Via::Wifi(address), "unused-pairing.plist", "UUID", "TEAM").await;
+        assert!(matches!(result, crate::renewal_wait::Probe::Disconnected(_)));
+    }
 
     #[test]
     fn legge_la_versione_ios() {
