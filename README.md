@@ -727,3 +727,24 @@ use a real newline between the heading and error detail.
 
 Selectively ported from `BartolomeoRusso9/altkeeper` PR #18 and fix commit
 `58fb793`; the Korean/English dashboard and Asia/Seoul renewal schedule remain.
+
+### Remember home and VPN iPhone addresses
+
+Open **iPhone → Connection addresses** in the web dashboard and save up to two
+`IP:pairing-port` entries, one per line. For example, save the iPhone's WireGuard
+address as `10.7.0.2:49152`. This is the iPhone pairing port, not WireGuard's UDP
+listen port. IPv6 endpoints use brackets, e.g. `[fd00::2]:49152`.
+
+Click **Check again** after saving. Connections try the explicit `--phone` /
+`ALTKEEPER_PHONE` address, the last successful address, and the saved addresses
+(without duplicates), then the existing Bonjour/LAN discovery. USB retains its
+normal priority when no explicit address is supplied. A stale address can add a
+short connection delay before the next candidate is tried.
+
+Saved entries survive restarts in `state/phone-addresses.json` and are separate
+from the automatically updated `state/phone-addr` cache. Thus a successful home
+connection does not erase the saved VPN address. Web actions, scheduled renewals,
+CLI operations and Keeper's built-in AltServer use the same candidates. Clear the
+field and save to remove manual entries while keeping automatic discovery.
+Only numeric IP addresses and nonzero ports are accepted; existing pairing still
+has to authenticate the phone. Saving an address neither renews nor installs apps.

@@ -255,4 +255,65 @@ Promise.all([checkLogPolling(), checkLogCopy()]).then(() => {
   console.log("Server log restart recovery, retention, scrolling and HTTP/HTTPS copy OK");
 }).catch(error => { console.error(error); process.exitCode = 1; });
 
+// Polling must not replace a draft or an edit made while saving addresses.
+async function checkPhoneAddresses() {
+  const controls = {"phone-addresses":{value:""}, "phone-addresses-save":{disabled:false}};
+  const requests = [], notices = [];
+  let resolveSave, fail = false;
+  const context = vm.createContext({
+    $: id => { assert(controls[id], id); return controls[id]; },
+    banner: (...args) => notices.push(args), t:x => x, refresh(){},
+    api: async (url, body) => {
+      requests.push({url, body});
+      if (fail) throw new Error("Save at most two iPhone addresses.");
+      return await new Promise(resolve => { resolveSave = resolve; });
+    },
+  });
+  const sync = embedded[1].match(/function syncPhoneAddresses\(config\) \{[\s\S]*?\r?\n\}/);
+  const save = embedded[1].match(/async function savePhoneAddresses\(\) \{[\s\S]*?\r?\n\}/);
+  assert(sync && save);
+  vm.runInContext('let addressDraftDirty = false, addressPending = null, addressSaving = false;\n' + sync[0] + '\n' + save[0], context);
+  vm.runInContext('syncPhoneAddresses({addresses:["10.7.0.2:49152"]})', context);
+  assert.equal(controls["phone-addresses"].value, "10.7.0.2:49152");
+  controls["phone-addresses"].value = " 10.7.0.3:49152 \n\n";
+  vm.runInContext('addressDraftDirty = true; syncPhoneAddresses({addresses:["10.7.0.2:49152"]})', context);
+  assert.equal(controls["phone-addresses"].value, " 10.7.0.3:49152 \n\n");
+  const pending = vm.runInContext('savePhoneAddresses()', context);
+  assert.equal(controls["phone-addresses-save"].disabled, true);
+  assert.equal(requests[0].url, "/api/phone-addresses");
+  assert.equal(JSON.stringify(requests[0].body), JSON.stringify({addresses:["10.7.0.3:49152"]}));
+  await vm.runInContext('savePhoneAddresses()', context);
+  assert.equal(requests.length, 1, "duplicate save is blocked");
+  resolveSave({addresses:["10.7.0.3:49152"]});
+  await pending;
+  vm.runInContext('syncPhoneAddresses({addresses:["10.7.0.2:49152"]})', context);
+  assert.equal(controls["phone-addresses"].value, "10.7.0.3:49152", "stale status must not undo a save");
+  vm.runInContext('syncPhoneAddresses({addresses:["10.7.0.3:49152"]})', context);
+  assert.equal(vm.runInContext('addressDraftDirty', context), false);
+
+  const second = vm.runInContext('savePhoneAddresses()', context);
+  controls["phone-addresses"].value = "10.7.0.4:49152";
+  vm.runInContext('addressDraftDirty = true; addressPending = null', context);
+  resolveSave({addresses:["10.7.0.3:49152"]});
+  await second;
+  vm.runInContext('syncPhoneAddresses({addresses:["10.7.0.3:49152"]})', context);
+  assert.equal(controls["phone-addresses"].value, "10.7.0.4:49152", "preserve edits during save");
+  fail = true;
+  await vm.runInContext('savePhoneAddresses()', context);
+  assert.equal(controls["phone-addresses"].value, "10.7.0.4:49152");
+  assert.equal(controls["phone-addresses-save"].disabled, false);
+  assert(notices.some(args => args[2] === "bad"));
+  fail = false;
+  controls["phone-addresses"].value = "";
+  const clear = vm.runInContext('savePhoneAddresses()', context);
+  assert.equal(requests.at(-1).body.addresses.length, 0);
+  resolveSave({addresses:[]});
+  await clear;
+  vm.runInContext('syncPhoneAddresses({addresses:[]})', context);
+  assert.equal(controls["phone-addresses"].value, "");
+  assert.equal(vm.runInContext('addressDraftDirty', context), false);
+  console.log("Saved phone address drafts, save confirmation, errors and clearing OK");
+}
+checkPhoneAddresses().catch(error => { console.error(error); process.exitCode = 1; });
+
 
