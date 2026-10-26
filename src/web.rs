@@ -59,6 +59,7 @@ struct App {
     tfa: Arc<apple::TfaChannel>,
     auto_renew: Mutex<AutoRenewConfig>,
     pending_ipa: Mutex<Option<PendingIpa>>,
+    renewal_wait: crate::renewal_wait::Control,
 }
 
 #[derive(Default, Clone)]
@@ -419,6 +420,7 @@ pub async fn serve(
         tfa: Arc::new(apple::TfaChannel::default()),
         auto_renew: Mutex::new(load_auto_renew()),
         pending_ipa: Mutex::new(None),
+        renewal_wait: crate::renewal_wait::Control::default(),
     });
     let router = Router::new()
         .route("/", get(index))
@@ -429,6 +431,7 @@ pub async fn serve(
         .route("/api/check", post(check))
         .route("/api/phone-addresses", post(update_phone_addresses))
         .route("/api/renew", post(renew))
+        .route("/api/renew/cancel-wait", post(cancel_renew_wait))
         .route("/api/auto-renew", post(update_auto_renew))
         .route("/api/discord", post(update_discord))
         .route("/api/discord/test", post(test_discord))
@@ -656,6 +659,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
     // Copy the view and release its mutex before reading the schedule. Never
     // hold the UI and scheduler mutexes together (retry logging also uses UI).
     let g = app.lock().clone();
+    let is_renewal = matches!(g.job.kind.as_str(), "auto_renew" | "renew_one" | "renew_all" | "renew_due");
     let schedule = app.auto_renew.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let next_scheduled = next_auto_run(&schedule, now());
     let asking = app.tfa.asking.load(Ordering::SeqCst);
@@ -714,6 +718,9 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
         "job": {
             "kind": g.job.kind, "running": g.job.running,
             "lines": g.job.lines, "ok": g.job.ok,
+            "waiting_for_phone": is_renewal && g.job.running && app.renewal_wait.is_waiting(),
+            "cancel_requested": is_renewal && app.renewal_wait.is_canceled(),
+            "canceled": is_renewal && g.job.ok == Some(false) && app.renewal_wait.is_canceled(),
         },
         "login": {
             "phase": login_phase,
@@ -983,6 +990,15 @@ async fn renew(
     }
     let threshold = app.auto_renew.lock().unwrap_or_else(|e| e.into_inner()).min_days as i64;
     spawn_job(guard, move |app| run_renew(app, force, bundle, installed_only, threshold, false));
+    json_ok()
+}
+
+async fn cancel_renew_wait(State(app): State<Arc<App>>) -> (StatusCode, Json<Value>) {
+    let g = app.lock();
+    if !g.job.running || !app.renewal_wait.is_waiting() {
+        return json_err(StatusCode::CONFLICT, "No iPhone response wait is active.");
+    }
+    app.renewal_wait.cancel();
     json_ok()
 }
 
@@ -1436,9 +1452,11 @@ async fn run_renew(
     app: Arc<App>, force: bool, bundle: Option<String>, installed_only: bool,
     min_days: i64, automatic: bool,
 ) {
+    app.renewal_wait.reset();
     let mut say = |s: &str| app.push_line(&english_job_line(s));
-    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, &mut say).await;
+    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, Some(&app.renewal_wait), &mut say).await;
     let ok = result.is_ok();
+    let canceled = !ok && app.renewal_wait.is_canceled();
     let error = result.as_ref().err().map(|err| short_error(err));
     if let Some(err) = &error {
         app.push_line(&format!("Error: {err}"));
@@ -1457,7 +1475,7 @@ async fn run_renew(
         let mut updated = config.clone();
         let mut notify = false;
         let mut retry_message = None;
-        if ok {
+        if ok || canceled {
             updated.retry_count = 0;
             updated.retry_at = None;
             updated.last_error = None;
@@ -2091,6 +2109,7 @@ mod tests {
             tfa: Arc::new(apple::TfaChannel::default()),
             auto_renew: Mutex::new(AutoRenewConfig::default()),
             pending_ipa: Mutex::new(None),
+            renewal_wait: crate::renewal_wait::Control::default(),
         });
         let schedule = app.auto_renew.lock().unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -2125,6 +2144,49 @@ mod tests {
         drop(schedule);
         done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(!sustained_block, "state held the UI mutex while waiting for the schedule");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_renewal_is_visible_and_can_be_canceled_from_the_dashboard() {
+        let app = Arc::new(App {
+            pin: None, phone: None, busy: AtomicBool::new(true),
+            inner: Mutex::new(Inner::default()),
+            tfa: Arc::new(apple::TfaChannel::default()),
+            auto_renew: Mutex::new(AutoRenewConfig::default()),
+            pending_ipa: Mutex::new(None),
+            renewal_wait: crate::renewal_wait::Control::default(),
+        });
+        app.lock().job.kind = "renew_one".into();
+        app.lock().job.running = true;
+        assert_eq!(cancel_renew_wait(State(app.clone())).await.0, StatusCode::CONFLICT);
+        assert!(!app.renewal_wait.is_canceled());
+
+        let waiting = crate::renewal_wait::await_install(
+            std::future::pending(),
+            || std::future::pending::<crate::renewal_wait::Probe>(),
+            &app.renewal_wait,
+            crate::renewal_wait::Policy {
+                grace: Duration::ZERO, poll: Duration::from_secs(15), max_wait: Duration::from_secs(3600),
+            },
+            || {},
+        );
+        let cancel_from_ui = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Json(snapshot) = state(State(app.clone())).await;
+            assert_eq!(snapshot["job"]["waiting_for_phone"], true);
+            assert_eq!(snapshot["job"]["running"], true);
+            assert_eq!(cancel_renew_wait(State(app.clone())).await.0, StatusCode::OK);
+        };
+        let (result, ()) = tokio::join!(waiting, cancel_from_ui);
+        assert_eq!(result, Err(crate::renewal_wait::CANCELLED.into()));
+        assert!(!app.renewal_wait.is_waiting());
+
+        // A later unrelated job must not inherit the renewal's canceled label.
+        app.lock().job.kind = "install".into();
+        app.lock().job.running = false;
+        app.lock().job.ok = Some(false);
+        let Json(snapshot) = state(State(app)).await;
+        assert_eq!(snapshot["job"]["canceled"], false);
     }
 
     #[test]
