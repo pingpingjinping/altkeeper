@@ -634,6 +634,73 @@ pub async fn scan_lan(port: u16) -> Vec<SocketAddr> {
 /// stessa porta mDNS (per esempio Home Assistant) le risposte dell'iPhone possono andare perse,
 /// quindi affidarsi solo alla ricerca sarebbe intermittente.
 const LAST_ADDR_FILE: &str = "state/phone-addr";
+const SAVED_ADDRS_FILE: &str = "state/phone-addresses.json";
+pub const MAX_SAVED_ADDRESSES: usize = 2;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedAddresses {
+    addresses: Vec<SocketAddr>,
+}
+
+pub fn validate_addresses(values: &[String]) -> Result<Vec<SocketAddr>, String> {
+    if values.len() > MAX_SAVED_ADDRESSES {
+        return Err("Save at most two iPhone addresses.".into());
+    }
+    let mut result = Vec::new();
+    for value in values {
+        let addr: SocketAddr = value.trim().parse()
+            .map_err(|_| "Use an IP address and pairing port, for example 10.7.0.2:49152.")?;
+        let broadcast = matches!(addr.ip(), IpAddr::V4(ip) if ip.is_broadcast());
+        if addr.port() == 0 || addr.ip().is_unspecified() || addr.ip().is_multicast() || broadcast {
+            return Err("Use a specific iPhone IP address and a nonzero pairing port.".into());
+        }
+        if !result.contains(&addr) { result.push(addr); }
+    }
+    Ok(result)
+}
+
+fn read_saved_addresses(path: &Path) -> Result<Vec<SocketAddr>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Cannot read saved iPhone addresses: {e}")),
+    };
+    let saved: SavedAddresses = serde_json::from_slice(&bytes)
+        .map_err(|_| "Saved iPhone addresses are invalid; save them again.".to_string())?;
+    validate_addresses(&saved.addresses.iter().map(ToString::to_string).collect::<Vec<_>>())
+}
+
+pub fn saved_addresses() -> Result<Vec<SocketAddr>, String> {
+    read_saved_addresses(Path::new(SAVED_ADDRS_FILE))
+}
+
+fn write_saved_addresses(path: &Path, values: &[String]) -> Result<Vec<SocketAddr>, String> {
+    let addresses = validate_addresses(values)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(dbg)?;
+    crate::fsperm::restrict_dir(parent).map_err(dbg)?;
+    let bytes = serde_json::to_vec_pretty(&SavedAddresses { addresses: addresses.clone() }).map_err(dbg)?;
+    // A reader sees either the previous complete config or the new complete config.
+    let temp = tempfile::NamedTempFile::new_in(parent).map_err(dbg)?;
+    crate::fsperm::write_private(temp.path(), &bytes).map_err(dbg)?;
+    temp.persist(path).map_err(dbg)?;
+    Ok(addresses)
+}
+
+pub fn save_addresses(values: &[String]) -> Result<Vec<SocketAddr>, String> {
+    write_saved_addresses(Path::new(SAVED_ADDRS_FILE), values)
+}
+
+fn connection_candidates(
+    preferred: Option<SocketAddr>, last: Option<SocketAddr>, saved: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut result = Vec::new();
+    for addr in preferred.into_iter().chain(last).chain(saved.iter().copied()) {
+        if !result.contains(&addr) { result.push(addr); }
+    }
+    result
+}
 
 fn read_last_addr(path: &Path) -> Option<SocketAddr> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -650,7 +717,7 @@ fn write_last_addr(path: &Path, addr: SocketAddr) {
 }
 
 /// Si collega al telefono: prima all'indirizzo indicato (se c'è), poi all'ultimo che ha
-/// funzionato, poi a quelli trovati via Bonjour (fino a 3 ricerche). Con più iPhone in rete
+/// funzionato, poi agli indirizzi salvati e a quelli trovati via Bonjour. Con più iPhone in rete
 /// vale quello che riconosce il nostro pairing.
 pub async fn connect_auto(
     preferred: Option<SocketAddr>,
@@ -676,13 +743,11 @@ pub async fn connect_auto(
     let mut tried: Vec<SocketAddr> = Vec::new();
     let mut last_err = String::new();
 
-    let mut known: Vec<SocketAddr> = Vec::new();
-    known.extend(preferred);
-    if let Some(last) = read_last_addr(cache) {
-        if !known.contains(&last) {
-            known.push(last);
-        }
-    }
+    let saved = saved_addresses().unwrap_or_else(|error| {
+        say(&format!("WARNING: {error}; continuing with automatic discovery."));
+        Vec::new()
+    });
+    let known = connection_candidates(preferred, read_last_addr(cache), &saved);
     for addr in known {
         tried.push(addr);
         match tokio::time::timeout(PER_TRY, connect(addr, pairing_path)).await {
@@ -809,6 +874,51 @@ mod tests {
 
     fn temp_file(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("altkeeper-test-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn saved_vpn_address_survives_switching_the_successful_home_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("phone-addresses.json");
+        let cache = dir.path().join("phone-addr");
+        let vpn: SocketAddr = "10.7.0.2:49152".parse().unwrap();
+        let home: SocketAddr = "192.168.1.60:49152".parse().unwrap();
+        write_saved_addresses(&settings, &[vpn.to_string()]).unwrap();
+        write_last_addr(&cache, home);
+        let saved = read_saved_addresses(&settings).unwrap();
+        assert_eq!(connection_candidates(None, read_last_addr(&cache), &saved), vec![home, vpn]);
+        write_last_addr(&cache, vpn);
+        assert_eq!(read_saved_addresses(&settings).unwrap(), vec![vpn]);
+        assert_eq!(connection_candidates(None, read_last_addr(&cache), &saved), vec![vpn]);
+        let explicit: SocketAddr = "192.168.1.61:49152".parse().unwrap();
+        assert_eq!(connection_candidates(Some(explicit), Some(home), &[vpn, home]), vec![explicit, home, vpn]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&settings).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn address_save_validates_before_replacing_existing_settings_and_can_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addresses.json");
+        let valid = vec![" 10.7.0.2:49152 ".to_string(), "10.7.0.2:49152".to_string()];
+        assert_eq!(write_saved_addresses(&path, &valid).unwrap().len(), 1);
+        let before = std::fs::read(&path).unwrap();
+        for invalid in ["10.7.0.2/24", "host.example:49152", "10.7.0.2:0", "0.0.0.0:49152", "224.0.0.1:49152", "255.255.255.255:49152", "[::]:49152", "[ff02::1]:49152"] {
+            assert!(write_saved_addresses(&path, &[invalid.into()]).is_err(), "{invalid}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        assert!(write_saved_addresses(&path, &vec!["10.7.0.2:49152".into(); 3]).is_err());
+        let ipv6 = vec!["[fd00::2]:49152".into()];
+        assert_eq!(write_saved_addresses(&path, &ipv6).unwrap()[0].to_string(), ipv6[0]);
+        assert_eq!(read_saved_addresses(&path).unwrap().len(), 1);
+        write_saved_addresses(&path, &[]).unwrap();
+        assert!(read_saved_addresses(&path).unwrap().is_empty());
+        std::fs::write(&path, b"broken JSON").unwrap();
+        assert!(read_saved_addresses(&path).is_err());
+        assert!(read_saved_addresses(&dir.path().join("missing.json")).unwrap().is_empty());
     }
 
     #[test]

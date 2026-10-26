@@ -41,6 +41,8 @@ const MAX_RETRIES: u8 = 2;
 const KST_OFFSET_SECS: u64 = 9 * 60 * 60;
 const DAY_SECS: u64 = 24 * 60 * 60;
 const MAX_JOB_LINES: usize = 300;
+// Leave room for saved home/VPN candidates in addition to the existing scan.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(45 + 12 * phone::MAX_SAVED_ADDRESSES as u64);
 const MAX_IPA_BYTES: usize = 1024 * 1024 * 1024;
 const PENDING_IPA_TTL: u64 = 15 * 60;
 
@@ -425,6 +427,7 @@ pub async fn serve(
         .route("/api/state", get(state))
         .route("/api/logs", get(logs))
         .route("/api/check", post(check))
+        .route("/api/phone-addresses", post(update_phone_addresses))
         .route("/api/renew", post(renew))
         .route("/api/auto-renew", post(update_auto_renew))
         .route("/api/discord", post(update_discord))
@@ -658,11 +661,19 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
     let asking = app.tfa.asking.load(Ordering::SeqCst);
     let login_phase = if asking { "needs_code" } else { g.login.phase };
     let code_error = app.tfa.last_error.lock().ok().and_then(|e| e.clone());
+    let (saved_addresses, address_error) = match phone::saved_addresses() {
+        Ok(addresses) => (addresses, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
 
     Json(json!({
         "now": now(),
         "busy": app.busy.load(Ordering::SeqCst),
         "pairing": pairing,
+        "phone_connection": {
+            "addresses": saved_addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "error": address_error,
+        },
         "auto_renew": {
             "enabled": schedule.enabled,
             "time": schedule.time,
@@ -727,6 +738,25 @@ async fn check(State(app): State<Arc<App>>) -> (StatusCode, Json<Value>) {
     json_ok()
 }
 
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhoneAddressesReq {
+    addresses: Vec<String>,
+}
+
+async fn update_phone_addresses(Json(req): Json<PhoneAddressesReq>) -> (StatusCode, Json<Value>) {
+    if let Err(error) = phone::validate_addresses(&req.addresses) {
+        return json_err(StatusCode::BAD_REQUEST, &error);
+    }
+    match phone::save_addresses(&req.addresses) {
+        Ok(addresses) => (StatusCode::OK, Json(json!({
+            "ok": true,
+            "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        }))),
+        Err(error) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot save iPhone addresses: {error}")),
+    }
+}
 
 #[derive(Deserialize)]
 struct AutoRenewReq {
@@ -1365,7 +1395,7 @@ async fn run_check(app: Arc<App>) {
     app.lock().snapshot.checking = true;
     let team = apple::read_account(Path::new(".")).and_then(|a| a.team_id);
 
-    let result = tokio::time::timeout(Duration::from_secs(45), async {
+    let result = tokio::time::timeout(CHECK_TIMEOUT, async {
         let (addr, mut link) = phone::connect_auto(app.phone, PAIRING_FILE, |_: &str| {}).await?;
         let profiles = crate::phone_profiles(&mut link).await?;
         Ok::<_, String>((addr, profiles))
@@ -1397,7 +1427,7 @@ async fn run_check(app: Arc<App>) {
             g.snapshot.profiles.clear();
             g.snapshot.reachable = Some(false);
             g.snapshot.error = Some(friendly_error("non risponde"));
-            g.snapshot.detail = Some("nessuna risposta entro 45 secondi".into());
+            g.snapshot.detail = Some(format!("no response within {} seconds", CHECK_TIMEOUT.as_secs()));
         }
     }
 }
@@ -2007,6 +2037,17 @@ fn append_log(lines: &[String], ok: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn invalid_address_request_is_rejected_before_writing_any_settings() {
+        let (status, Json(body)) = update_phone_addresses(Json(PhoneAddressesReq {
+            addresses: vec!["10.7.0.2/24".into()],
+        })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("pairing port"));
+        assert!(serde_json::from_str::<PhoneAddressesReq>(r#"{}"#).is_err());
+        assert!(serde_json::from_str::<PhoneAddressesReq>(r#"{"addresses":[],"unexpected":true}"#).is_err());
+    }
+
     #[tokio::test]
     async fn api_logs_returns_new_lines() {
         let mine = |v: &Value| -> Vec<String> {
