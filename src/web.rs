@@ -2162,13 +2162,13 @@ mod tests {
         assert!(!app.renewal_wait.is_canceled());
 
         let waiting = crate::renewal_wait::await_install(
-            std::future::pending(),
+            || std::future::pending::<Result<(), crate::renewal_wait::AttemptError>>(),
             || std::future::pending::<crate::renewal_wait::Probe>(),
             &app.renewal_wait,
             crate::renewal_wait::Policy {
                 grace: Duration::ZERO, poll: Duration::from_secs(15), max_wait: Duration::from_secs(3600),
             },
-            || {},
+            |_| {},
         );
         let cancel_from_ui = async {
             tokio::time::sleep(Duration::from_secs(1)).await;
