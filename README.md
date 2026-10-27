@@ -732,17 +732,25 @@ Selectively ported from `BartolomeoRusso9/altkeeper` PR #18 and fix commit
 
 Manual and scheduled profile renewals keep an unanswered installation request
 alive after 60 seconds and show **Waiting for iPhone response** instead of
-immediately failing. Unlock the iPhone and keep it awake until all app and
-extension profiles finish. The web page can be closed while the server waits.
+immediately failing. A socket-level `TimedOut` error also enters this wait,
+even when it occurs before 60 seconds. Unlock the iPhone and keep it awake until
+all app and extension profiles finish. The web page can be closed while the server waits.
 This is an experimental response wait, not a verified lock-state detector: a
 timeout alone does not prove that the phone is locked.
 
 During the wait, AltKeeper checks the original endpoint and uses a separate
 connection to look for the exact downloaded profile UUID and Apple team. If it
 is already installed, renewal continues without downloading or installing that
-profile again. The old unanswered connection is discarded before further
-commands. Checks pause for 15 seconds between probes. Initial connection
-failures never enter this wait. Losing the Wi-Fi pairing endpoint (or USB
+profile again. A failed socket is discarded; if an authenticated profile listing
+confirms that the downloaded UUID is absent, the same downloaded profile is
+installed on a fresh connection. A reachable endpoint whose profile service
+cannot be read stays pending, without resubmitting an unverified installation.
+Apple login/profile download is not repeated by these installation retries.
+Explicit installation rejections still fail immediately.
+The old unanswered connection is discarded before further commands.
+Checks pause for 15 seconds between probes, and reconnects do not reset the
+12-hour wait deadline. Initial connection failures never enter this wait.
+Losing the Wi-Fi pairing endpoint (or USB
 connection) ends the wait as a connection failure; scheduled jobs retain their
 existing 30-minute retry policy. A reachable endpoint whose service is slow
 remains pending, with a maximum wait of 12 hours.

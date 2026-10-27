@@ -164,11 +164,19 @@ impl PhoneLink {
     }
 
     pub async fn install_profile(&mut self, profile: Vec<u8>) -> Result<(), String> {
+        self.install_profile_request(profile).await.map_err(dbg)
+    }
+
+    pub async fn install_renewal_profile(&mut self, profile: Vec<u8>) -> Result<(), crate::renewal_wait::AttemptError> {
+        self.install_profile_request(profile).await.map_err(renewal_install_error)
+    }
+
+    async fn install_profile_request(&mut self, profile: Vec<u8>) -> Result<(), idevice::IdeviceError> {
         let misagent = match self {
             Self::Rsd { misagent, .. } | Self::Legacy { misagent, .. } => misagent,
         };
 
-        misagent.install(profile).await.map_err(dbg)
+        misagent.install(profile).await
     }
 
     pub async fn remove_profile(&mut self, uuid: &str) -> Result<(), String> {
@@ -569,19 +577,31 @@ pub async fn probe_profile(
     let mut link = match reconnect(via, pairing_path).await {
         Ok(link) => link,
         Err(error) => return match via {
-            Via::Wifi(_) => Probe::Connected,
+            Via::Wifi(_) => Probe::Unresponsive,
             Via::Usb => Probe::Disconnected(error),
         },
     };
     match with_timeout("Profile verification", Duration::from_secs(10), link.profiles()).await {
         Ok(raw) if contains_profile(&raw, uuid, team) => Probe::Installed,
-        _ => Probe::Connected,
+        Ok(_) => Probe::Connected,
+        Err(_) => Probe::Unresponsive,
     }
 }
 
 fn contains_profile(raw: &[Vec<u8>], uuid: &str, team: &str) -> bool {
     !uuid.is_empty() && raw.iter().filter_map(|bytes| crate::profile::parse(bytes))
         .any(|p| p.uuid.eq_ignore_ascii_case(uuid) && p.team_id.as_deref() == Some(team))
+}
+
+fn renewal_install_error(error: idevice::IdeviceError) -> crate::renewal_wait::AttemptError {
+    use crate::renewal_wait::AttemptError;
+    if matches!(&error, idevice::IdeviceError::Socket(io) if io.kind() == std::io::ErrorKind::TimedOut) {
+        AttemptError::Retryable(dbg(error))
+    } else {
+        // A provisioning rejection, malformed response or other explicit error
+        // must not be mistaken for a locked/slow phone.
+        AttemptError::Fatal(dbg(error))
+    }
 }
 
 /// L'unico demone mDNS del processo: ricerca dell'iPhone e annuncio di AltServer lo condividono
@@ -875,6 +895,16 @@ pub async fn pair_usb(out: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_typed_install_socket_timeouts_are_recoverable() {
+        use crate::renewal_wait::AttemptError;
+        use std::io::{Error, ErrorKind};
+        assert!(matches!(renewal_install_error(idevice::IdeviceError::Socket(Error::from(ErrorKind::TimedOut))), AttemptError::Retryable(_)));
+        assert!(matches!(renewal_install_error(idevice::IdeviceError::Socket(Error::from(ErrorKind::PermissionDenied))), AttemptError::Fatal(_)));
+        assert!(matches!(renewal_install_error(idevice::IdeviceError::MisagentFailure), AttemptError::Fatal(_)));
+        assert!(matches!(renewal_install_error(idevice::IdeviceError::UnexpectedResponse("TimedOut".into())), AttemptError::Fatal(_)));
+    }
 
     #[test]
     fn verification_requires_the_exact_new_uuid_and_team() {

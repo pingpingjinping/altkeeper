@@ -382,24 +382,40 @@ async fn cmd_renew(
         {
             return Err("Downloaded provisioning profile does not match the requested team and app.".into());
         }
+        let mut first_link = Some(link);
         let completion = renewal_wait::await_install(
-            link.install_profile(bytes),
+            || {
+                let existing = first_link.take();
+                let profile_bytes = bytes.clone();
+                async move {
+                    let mut request_link = match existing {
+                        Some(link) => link,
+                        None => phone::reconnect(route, PAIRING_FILE).await
+                            .map_err(renewal_wait::AttemptError::Retryable)?,
+                    };
+                    request_link.install_renewal_profile(profile_bytes).await?;
+                    Ok(request_link)
+                }
+            },
             || phone::probe_profile(route, PAIRING_FILE, &expected.uuid, &team_id),
             wait_control,
             renewal_wait::Policy::default(),
-            || say("WAITING_FOR_PHONE No install response after 60 seconds. Keeping the request pending; unlock the iPhone and keep it awake. Waiting stops if the phone disconnects."),
+            |reason| match reason {
+                renewal_wait::WaitReason::NoResponse => say("WAITING_FOR_PHONE No install response after 60 seconds. Keeping the request pending; unlock the iPhone and keep it awake. Waiting stops if the phone disconnects."),
+                renewal_wait::WaitReason::SocketTimeout(error) => say(&format!("WAITING_FOR_PHONE Install socket timed out ({error}). Reconnecting to verify the downloaded profile; waiting while the iPhone remains reachable. Unlock it and keep it awake.")),
+            },
         ).await.map_err(|e| format!("Profile install: {e}"))?;
         say("      installed on the phone");
         say(&format!("RENEWED {bundle}"));
         done += 1;
-        if completion == renewal_wait::Completion::Verified {
-            say("      New profile verified on the iPhone despite a missing install response.");
-            // The old stream still has an unanswered request. Never issue the
-            // next install or CopyAll on it, where a late reply could be mistaken
-            // for the next command's response.
-            drop(link);
-            link = phone::reconnect(route, PAIRING_FILE).await?;
-        }
+        link = match completion {
+            renewal_wait::Completion::Acknowledged(link) => link,
+            renewal_wait::Completion::Verified => {
+                say("      New profile verified on the iPhone despite a missing install response.");
+                // An unanswered or failed stream has already been discarded.
+                phone::reconnect(route, PAIRING_FILE).await?
+            }
+        };
     }
 
     if !dry_run && done > 0 {
