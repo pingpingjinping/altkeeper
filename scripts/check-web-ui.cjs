@@ -114,7 +114,7 @@ console.log("Localized dashboard JavaScript syntax, actions, labels and layout O
 // must survive polling, and a snapshot started before an action must not paint
 // over the newer state once another refresh has been requested.
 async function checkDashboardState() {
-  const controls = { "auto-time": { value: "" }, "auto-days": { value: "" } };
+  const controls = { "auto-time": { value: "" }, "auto-days": { value: "" }, "auto-register-missing": { checked: false } };
   for (const control of Object.values(controls)) {
     control.listeners = {};
     control.addEventListener = (event, fn) => { control.listeners[event] = fn; };
@@ -136,7 +136,7 @@ async function checkDashboardState() {
   const source = embedded[1];
   // Run only the draft declaration/helper/listeners: the full browser render
   // needs many unrelated DOM controls.
-  const helper = source.match(/function syncAutoRenewInputs\(auto\) \{[\s\S]*?\r?\n\}\r?\nfor \(const id of \["auto-time", "auto-days"\]\) \{[\s\S]*?\r?\n\}/);
+  const helper = source.match(/function syncAutoRenewInputs\(auto\) \{[\s\S]*?\r?\n\}\r?\nfor \(const id of \["auto-time", "auto-days", "auto-register-missing"\]\) \{[\s\S]*?\r?\n\}/);
   assert(helper);
   vm.runInContext('const $ = id => document.getElementById(id); let autoDraftDirty = false, autoSavePending = false;\n' + helper[0], context);
   vm.runInContext('syncAutoRenewInputs({time:"21:17",min_days:3})', context);
@@ -152,6 +152,12 @@ async function checkDashboardState() {
   vm.runInContext('syncAutoRenewInputs({time:"22:30",min_days:5})', context);
   assert.equal(controls["auto-time"].value, "22:30");
   assert.equal(vm.runInContext('autoDraftDirty', context), false, "server confirmation clears the draft");
+  controls["auto-register-missing"].checked = true;
+  controls["auto-register-missing"].listeners.change();
+  vm.runInContext('syncAutoRenewInputs({time:"22:30",min_days:5,register_missing_app_ids:false})', context);
+  assert.equal(controls["auto-register-missing"].checked, true, "polling must not reset the checkbox draft");
+  vm.runInContext('autoSavePending = true; syncAutoRenewInputs({time:"22:30",min_days:5,register_missing_app_ids:true})', context);
+  assert.equal(vm.runInContext('autoDraftDirty', context), false, "checkbox save confirmation clears the draft");
 
   const api = source.match(/async function api\(path, body, signal\) \{[\s\S]*?\r?\n\}/);
   const refresh = source.match(/async function refresh\(\) \{[\s\S]*?\r?\n\}/);
