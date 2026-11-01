@@ -531,12 +531,11 @@ pub async fn register_renewal_app_id(
     team: &DeveloperTeam,
     identifier: &str,
 ) -> Result<AppId, String> {
-    // Stable, short, identifier-derived label. isideload normalizes it for Apple.
-    let name = format!(
-        "AltKeeper{}",
-        identifier.rsplit('.').take(3).collect::<Vec<_>>().join("")
-    );
-    sess.add_app_id(team, &name, identifier, DeveloperDeviceType::Ios)
+    // Follow upstream's short display-name convention. Joining multiple Bundle
+    // ID segments can exceed Apple's App ID name limit for app extensions.
+    // isideload normalizes the final segment to Apple's ASCII requirements.
+    let name = identifier.rsplit('.').next().unwrap_or(identifier);
+    sess.add_app_id(team, name, identifier, DeveloperDeviceType::Ios)
         .await
         .map_err(|e| e.to_string())
 }
