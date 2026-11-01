@@ -85,7 +85,10 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
   App IDs for existing iPhone profiles of the configured Apple team. This
   applies to manual web renewals and the daily schedule. CLI users may opt in
   with `renew --register-missing-app-ids`. Apple limits free account App ID
-  registrations over seven days, so registration can fail until quota returns.
+  registrations over seven days. AltKeeper checks Apple's reported remaining
+  App ID slots before attempting registration, and continues renewing known IDs
+  if quota is exhausted. If Apple omits the quota, registration is attempted
+  and errors are reported without assuming availability.
   Newly registered IDs may lack the old app's entitlements and capabilities;
   test apps with extensions carefully. Dry runs never register App IDs.
 - Old profiles stay on the phone after a renewal (iOS does not remove them), so you will see
