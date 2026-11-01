@@ -400,7 +400,7 @@ async fn cmd_renew(
             continue;
         }
         say(&format!("   {bundle}: expires in {days} days, downloading a new profile..."));
-        let new = apple::download_profile(&mut sess, &team, app).await?;
+        let new = apple::download_profile(&mut sess, &team, &app).await?;
         say(&crate::tr!(format!("      nuovo profilo valido fino al {}", new.date_expire.to_xml_format()), format!("      new profile valid until {}", new.date_expire.to_xml_format())));
         let bytes: Vec<u8> = new.encoded_profile.into();
         let expected = profile::parse(&bytes)
