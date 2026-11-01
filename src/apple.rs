@@ -341,6 +341,18 @@ async fn anisette_for_altstore_once(dir: &Path) -> Result<serde_json::Value, Str
     }))
 }
 
+
+#[cfg(test)]
+mod app_id_quota_tests {
+    #[test]
+    fn treat_zero_or_negative_quota_as_exhausted_but_not_unknown() {
+        assert!(super::quota_exhausted(Some(0)));
+        assert!(super::quota_exhausted(Some(-1)));
+        assert!(!super::quota_exhausted(Some(1)));
+        assert!(!super::quota_exhausted(None));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{anisette_url, is_max_certs_error, iso8601_utc, max_certs_behavior, needs_reprovision, parse_2fa_input};
@@ -595,9 +607,40 @@ pub async fn app_ids(
     sess: &mut DeveloperSession,
     team: &DeveloperTeam,
 ) -> Result<Vec<AppId>, String> {
+    app_ids_with_quota(sess, team).await.map(|(ids, _)| ids)
+}
+
+/// Read Apple-reported remaining App ID registrations for the configured team.
+/// A missing quota value means Apple did not report it, not unlimited quota.
+pub async fn app_ids_with_quota(
+    sess: &mut DeveloperSession,
+    team: &DeveloperTeam,
+) -> Result<(Vec<AppId>, Option<i64>), String> {
     sess.list_app_ids(team, DeveloperDeviceType::Ios)
         .await
-        .map(|r| r.app_ids)
+        .map(|r| (r.app_ids, r.available_quantity))
+        .map_err(|e| e.to_string())
+}
+
+/// Treat zero or a negative quota from Apple as unavailable; never assume that
+/// an unknown quota is zero (Apple may omit this field).
+pub fn quota_exhausted(remaining: Option<i64>) -> bool {
+    remaining.is_some_and(|value| value <= 0)
+}
+
+/// Explicitly opted-in recovery of an App ID observed in this team's phone profiles.
+/// Creating IDs can consume a free Apple team's seven-day registration quota.
+pub async fn register_renewal_app_id(
+    sess: &mut DeveloperSession,
+    team: &DeveloperTeam,
+    identifier: &str,
+) -> Result<AppId, String> {
+    // Follow upstream's short display-name convention. Joining multiple Bundle
+    // ID segments can exceed Apple's App ID name limit for app extensions.
+    // isideload normalizes the final segment to Apple's ASCII requirements.
+    let name = identifier.rsplit('.').next().unwrap_or(identifier);
+    sess.add_app_id(team, name, identifier, DeveloperDeviceType::Ios)
+        .await
         .map_err(|e| e.to_string())
 }
 

@@ -74,6 +74,11 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
 - Renews the provisioning profiles of your apps (and, in AltServer mode, installs the apps AltStore
   sends it). The renewal flow does not re-sign apps or create/revoke certificates. Installing an
   IPA uploaded from the web page does sign it and may create a development certificate.
+- When Apple requests a two-factor code during a **web-started or scheduled**
+  renewal, the dashboard shows the existing 6-digit verification form. The
+  Apple authentication wait times out after five minutes without a response.
+  CLI renewals remain unattended and fail if interactive 2FA is required;
+  existing scheduled retry/Discord failure-notification behavior is unchanged.
 - **Anisette server selection and V3 connection check:** The web page lets
   you save a custom http(s) Anisette URL, restore the vendored isideload default,
   and check the selected server's V3 `client_info` response (no Apple login).
@@ -87,6 +92,17 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
   Apple ID and its password on the server.
 - The two do not clash: `renew` looks at the newest profile on the phone. If AltStore renewed
   recently, `renew` does nothing and does not even sign in to Apple.
+- **Optional missing App ID recovery (default OFF):** In the web page's Automatic renewal
+  settings, enable **Auto-register missing App IDs on Apple** to let renewals recreate
+  App IDs for existing iPhone profiles of the configured Apple team. This
+  applies to manual web renewals and the daily schedule. CLI users may opt in
+  with `renew --register-missing-app-ids`. Apple limits free account App ID
+  registrations over seven days. AltKeeper checks Apple's reported remaining
+  App ID slots before attempting registration, and continues renewing known IDs
+  if quota is exhausted. If Apple omits the quota, registration is attempted
+  and errors are reported without assuming availability.
+  Newly registered IDs may lack the old app's entitlements and capabilities;
+  test apps with extensions carefully. Dry runs never register App IDs.
 - Old profiles stay on the phone after a renewal (iOS does not remove them), so you will see
   several profiles per app. That is expected. In AltServer mode it never removes profiles, even
   when AltStore asks (`activeProfiles`).
