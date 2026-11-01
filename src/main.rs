@@ -357,15 +357,31 @@ async fn cmd_renew(
     apple::set_interactive(false);
     let mut sess = apple::open_session(Path::new("."), &acc.apple_id, &acc.password).await?;
     let team = apple::pick_team(&mut sess, Some(&team_id), false).await?;
-    let ids = apple::app_ids(&mut sess, &team).await?;
+    let (ids, mut available_quantity) = apple::app_ids_with_quota(&mut sess, &team).await?;
+    match available_quantity {
+        Some(n) => say(&format!("Apple reports {n} remaining App ID registration slot(s).")),
+        None => say("Apple did not report remaining App ID registration slots."),
+    }
 
     let mut done = 0;
     let mut missing_app_ids = Vec::new();
     for (bundle, days) in due {
         let app = if let Some(existing) = ids.iter().find(|a| a.identifier == bundle) {
             existing.clone()
+        } else if register_missing_app_ids && apple::quota_exhausted(available_quantity) {
+            // Avoid futile Apple developer-service requests once the free-team quota
+            // is exhausted. Keep other registered apps renewing normally.
+            say(&format!("   {bundle}: no App ID and Apple reports no registration quota remaining; skipping"));
+            say(&format!("MISSING_APP_ID {bundle}"));
+            missing_app_ids.push(bundle);
+            continue;
         } else if register_missing_app_ids && dry_run {
             say(&format!("   {bundle}: expires in {days} days, WOULD REGISTER missing App ID (dry run)"));
+            // Simulate the quota consumption so previews of several missing IDs
+            // cannot promise more registrations than Apple currently allows.
+            if let Some(n) = available_quantity.as_mut() {
+                *n = n.saturating_sub(1);
+            }
             continue;
         } else if register_missing_app_ids {
             // The candidate comes only from a profile belonging to the configured
@@ -373,6 +389,9 @@ async fn cmd_renew(
             say(&format!("   {bundle}: App ID missing on Apple; attempting registration..."));
             match apple::register_renewal_app_id(&mut sess, &team, bundle).await {
                 Ok(created) if created.identifier == bundle => {
+                    if let Some(n) = available_quantity.as_mut() {
+                        *n = n.saturating_sub(1);
+                    }
                     say(&format!("   {bundle}: App ID registered successfully"));
                     created
                 }
