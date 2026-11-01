@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use isideload::{
-    anisette::remote_v3::RemoteV3AnisetteProvider,
+    anisette::{AnisetteProvider, remote_v3::{RemoteV3AnisetteProvider, DEFAULT_ANISETTE_V3_URL}},
     auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
     dev::{
         app_ids::{AppId, AppIdsApi, Profile},
@@ -25,6 +25,8 @@ use crate::phone::dbg;
 
 const ACCOUNT_FILE: &str = "account.json";
 const STATE_DIR: &str = "state";
+const ANISETTE_URL_FILE: &str = "anisette-url";
+const ANISETTE_EFFECTIVE_URL_FILE: &str = "anisette-effective-url";
 
 /// Se `true` la callback 2FA chiede il codice sul terminale, altrimenti fallisce
 /// (un servizio non presidiato non può inserire codici).
@@ -111,13 +113,104 @@ impl TfaChannel {
 /// `ALTKEEPER_ANISETTE_URL` se ne può usare uno proprio (per esempio `anisette-v3-server`),
 /// invece di pesare su un servizio di terzi.
 pub fn anisette_url(value: Option<&str>) -> Result<Option<String>, String> {
-    match value.map(str::trim).filter(|v| !v.is_empty()) {
-        None => Ok(None),
-        Some(u) if u.starts_with("https://") || u.starts_with("http://") => {
-            Ok(Some(u.trim_end_matches('/').to_string()))
-        }
-        Some(_) => Err(crate::tr!("ALTKEEPER_ANISETTE_URL deve iniziare con http:// o https://", "ALTKEEPER_ANISETTE_URL must start with http:// or https://").into()),
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let rest = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://"))
+        .ok_or("Anisette URL must begin with http:// or https://.")?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') || authority.chars().any(char::is_whitespace)
+        || raw.chars().any(char::is_control) || raw.contains('\\') || raw.contains('?')
+        || raw.contains('#') || authority == ":"
+    {
+        return Err("Invalid Anisette URL: supply an http(s) URL without credentials, queries or fragments.".into());
     }
+    Ok(Some(raw.trim_end_matches('/').to_string()))
+}
+
+pub struct AnisetteChoice {
+    pub url: String,
+    pub source: &'static str,
+    pub locked: bool,
+}
+
+/// The legacy environment override always wins. Without an override, a saved
+/// web choice is used; absent that, use the vendored isideload default.
+pub fn anisette_choice(dir: &Path) -> Result<AnisetteChoice, String> {
+    if let Some(raw) = crate::env::var("ANISETTE_URL") {
+        return Ok(AnisetteChoice {
+            url: anisette_url(Some(&raw))?.ok_or("Empty Anisette environment URL.")?,
+            source: "env", locked: true,
+        });
+    }
+    match std::fs::read_to_string(dir.join(STATE_DIR).join(ANISETTE_URL_FILE)) {
+        Ok(raw) => Ok(AnisetteChoice {
+            url: anisette_url(Some(&raw))?.ok_or("Saved Anisette URL is empty.")?,
+            source: "file", locked: false,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AnisetteChoice {
+            url: DEFAULT_ANISETTE_V3_URL.to_string(),
+            source: "default", locked: false,
+        }),
+        Err(e) => Err(format!("Cannot read saved Anisette URL: {e}")),
+    }
+}
+
+/// Save or clear the dashboard choice. Only a real effective URL change retires
+/// the previous provisioned identity; the original is kept as .stale.
+pub fn save_anisette_choice(dir: &Path, new_url: Option<&str>) -> Result<AnisetteChoice, String> {
+    let previous = anisette_choice(dir)?;
+    if previous.locked {
+        return Err("Anisette server is locked by ALTKEEPER_ANISETTE_URL.".into());
+    }
+    let validated = match new_url {
+        Some(raw) => Some(anisette_url(Some(raw))?.ok_or("Supply a nonempty Anisette URL.")?),
+        None => None,
+    };
+    let state = dir.join(STATE_DIR);
+    std::fs::create_dir_all(&state).map_err(dbg)?;
+    crate::fsperm::restrict_dir(&state).map_err(dbg)?;
+    let file = state.join(ANISETTE_URL_FILE);
+    match validated {
+        Some(url) => {
+            let temp = state.join("anisette-url.tmp");
+            crate::fsperm::write_private(&temp, url.as_bytes()).map_err(dbg)?;
+            if let Err(e) = std::fs::rename(&temp, &file) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(format!("Cannot save Anisette URL: {e}"));
+            }
+        }
+        None => match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Cannot restore default Anisette server: {e}")),
+        },
+    }
+    let current = anisette_choice(dir)?;
+    if current.url != previous.url {
+        if retire_anisette_state(dir)? {
+            crate::log::line("[anisette] server changed: moved the previous provisioning identity to .stale");
+        }
+        crate::fsperm::write_private(&state.join(ANISETTE_EFFECTIVE_URL_FILE), current.url.as_bytes()).map_err(dbg)?;
+    }
+    Ok(current)
+}
+
+/// Only check the V3 client_info endpoint. No account login, provisioning, or
+/// mutation of the stored authentication identity occurs during this test.
+pub async fn test_anisette_client_info(dir: &Path, candidate: Option<&str>) -> Result<(), String> {
+    let choice = anisette_choice(dir)?;
+    let url = match candidate.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => anisette_url(Some(raw))?.ok_or("Supply an Anisette URL.")?,
+        None => choice.url,
+    };
+    let provider = RemoteV3AnisetteProvider::default()
+        .map_err(|e| e.to_string())?.set_url(&url);
+    tokio::time::timeout(Duration::from_secs(12), provider.get_client_info())
+        .await
+        .map_err(|_| "Anisette connection check timed out after 12 seconds.".to_string())?
+        .map_err(|e| format!("Anisette V3 client_info failed: {e}"))?;
+    Ok(())
 }
 
 /// L'identità anisette del "dispositivo" resta su disco (`state/`): dopo il primo codice 2FA
@@ -126,10 +219,18 @@ fn anisette_provider(dir: &Path) -> Result<RemoteV3AnisetteProvider, String> {
     let state = dir.join(STATE_DIR);
     std::fs::create_dir_all(&state).map_err(dbg)?;
     crate::fsperm::restrict_dir(&state).map_err(dbg)?;
-    let mut provider = RemoteV3AnisetteProvider::default().map_err(|e| e.to_string())?;
-    if let Some(url) = anisette_url(crate::env::var("ANISETTE_URL").as_deref())? {
-        provider = provider.set_url(&url);
+    let choice = anisette_choice(dir)?;
+    // On the first run of an upgraded installation no marker exists: preserve
+    // the previously saved identity rather than invalidating it needlessly.
+    let marker = state.join(ANISETTE_EFFECTIVE_URL_FILE);
+    if let Ok(previous) = std::fs::read_to_string(&marker) {
+        if previous.trim() != choice.url && retire_anisette_state(dir)? {
+            crate::log::line("[anisette] effective server changed: retired the old identity");
+        }
     }
+    crate::fsperm::write_private(&marker, choice.url.as_bytes()).map_err(dbg)?;
+    let provider = RemoteV3AnisetteProvider::default().map_err(|e| e.to_string())?
+        .set_url(&choice.url);
     Ok(provider
         .set_storage(Box::new(FsStorage::new(state)))
         .set_serial_number("2".to_string()))
@@ -301,6 +402,9 @@ mod tests {
         );
         assert!(anisette_url(Some("ani.example.org")).is_err());
         assert!(anisette_url(Some("ftp://x")).is_err());
+        assert!(anisette_url(Some("http://")).is_err());
+        assert!(anisette_url(Some("https://user:password@example.com")).is_err());
+        assert!(anisette_url(Some("https://example.com?token=bad")).is_err());
     }
 
     #[test]

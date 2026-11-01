@@ -74,6 +74,13 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
 - Renews the provisioning profiles of your apps (and, in AltServer mode, installs the apps AltStore
   sends it). The renewal flow does not re-sign apps or create/revoke certificates. Installing an
   IPA uploaded from the web page does sign it and may create a development certificate.
+- **Anisette server selection and V3 connection check:** The web page lets
+  you save a custom http(s) Anisette URL, restore the vendored isideload default,
+  and check the selected server's V3 `client_info` response (no Apple login).
+  `ALTKEEPER_ANISETTE_URL` always overrides and locks the web choice. A changed
+  effective server retires the old `state/anisette_state` to a `.stale` backup
+  to avoid reusing incompatible provisioning identity. Changing servers can
+  require Apple verification again. No local Anisette server is started.
 - **AltServer mode does not need your Apple ID on the server.** AltStore signs in on the iPhone;
   this program only gives it anisette data and installs what AltStore sends. The unattended renewal
   (`renew`, cron, and the web page's renew action) and signing an IPA from the web page do need the
