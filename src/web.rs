@@ -437,6 +437,8 @@ pub async fn serve(
         .route("/api/renew", post(renew))
         .route("/api/renew/cancel-wait", post(cancel_renew_wait))
         .route("/api/auto-renew", post(update_auto_renew))
+        .route("/api/anisette", post(update_anisette))
+        .route("/api/anisette/test", post(test_anisette))
         .route("/api/discord", post(update_discord))
         .route("/api/discord/test", post(test_discord))
         .route("/api/profile/remove", post(remove_profile))
@@ -643,6 +645,7 @@ async fn logs(uri: Uri) -> Json<Value> {
 async fn state(State(app): State<Arc<App>>) -> Json<Value> {
     expire_pending_ipa(&app);
     let account = apple::read_account(Path::new("."));
+    let anisette = apple::anisette_choice(Path::new("."));
     let pairing = Path::new(PAIRING_FILE).exists();
 
     // Se i dati sul telefono sono vecchi, si riguarda in background senza far aspettare la pagina.
@@ -693,6 +696,10 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
             "discord_configured": discord_configured(),
             "time_zone": "Asia/Seoul",
             "next_run": next_scheduled,
+        },
+        "anisette": match anisette {
+            Ok(choice) => json!({ "url": choice.url, "source": choice.source, "locked": choice.locked }),
+            Err(error) => json!({ "error": error, "locked": true }),
         },
         "account": {
             "present": account.is_some(),
@@ -767,6 +774,40 @@ async fn update_phone_addresses(Json(req): Json<PhoneAddressesReq>) -> (StatusCo
             "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }))),
         Err(error) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot save iPhone addresses: {error}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnisetteReq {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    clear: bool,
+}
+
+async fn update_anisette(
+    State(app): State<Arc<App>>,
+    Json(req): Json<AnisetteReq>,
+) -> (StatusCode, Json<Value>) {
+    // Do not swap identities during active Apple, signing, or renewal jobs.
+    let Some(_guard) = try_busy(&app) else {
+        return json_err(StatusCode::CONFLICT, BUSY_MSG);
+    };
+    if !req.clear && req.url.as_deref().is_none_or(|v| v.trim().is_empty()) {
+        return json_err(StatusCode::BAD_REQUEST, "Supply a complete http(s) Anisette URL.");
+    }
+    match apple::save_anisette_choice(Path::new("."), if req.clear { None } else { req.url.as_deref() }) {
+        Ok(choice) => (StatusCode::OK, Json(json!({ "ok": true, "url": choice.url }))),
+        Err(error) => json_err(StatusCode::BAD_REQUEST, &error),
+    }
+}
+
+async fn test_anisette(
+    Json(req): Json<AnisetteReq>,
+) -> (StatusCode, Json<Value>) {
+    match apple::test_anisette_client_info(Path::new("."), req.url.as_deref()).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(error) => json_err(StatusCode::BAD_GATEWAY, &error),
     }
 }
 
