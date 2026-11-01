@@ -202,6 +202,9 @@ struct AutoRenewConfig {
     time: String,
     #[serde(default = "default_min_days")]
     min_days: u8,
+    /// Opt-in; Apple limits free-team registrations.
+    #[serde(default)]
+    register_missing_app_ids: bool,
     /// KST calendar day of the most recent automatic attempt.
     last_attempt_day: Option<u64>,
     #[serde(default)]
@@ -219,6 +222,7 @@ impl Default for AutoRenewConfig {
             enabled: false,
             time: "06:00".into(),
             min_days: 3,
+            register_missing_app_ids: false,
             last_attempt_day: None,
             retry_count: 0,
             retry_at: None,
@@ -682,6 +686,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
             "enabled": schedule.enabled,
             "time": schedule.time,
             "min_days": schedule.min_days,
+            "register_missing_app_ids": schedule.register_missing_app_ids,
             "retry_count": schedule.retry_count,
             "retry_at": schedule.retry_at,
             "last_error": schedule.last_error,
@@ -771,6 +776,9 @@ struct AutoRenewReq {
     time: String,
     #[serde(default = "default_min_days")]
     min_days: u8,
+    /// Preserve a saved setting when an older cached UI submits this request.
+    #[serde(default)]
+    register_missing_app_ids: Option<bool>,
 }
 
 async fn update_auto_renew(
@@ -802,6 +810,9 @@ async fn update_auto_renew(
     updated.enabled = req.enabled;
     updated.time = req.time;
     updated.min_days = req.min_days;
+    if let Some(value) = req.register_missing_app_ids {
+        updated.register_missing_app_ids = value;
+    }
     if !req.enabled {
         updated.retry_at = None;
         updated.retry_count = 0;
@@ -1454,7 +1465,8 @@ async fn run_renew(
 ) {
     app.renewal_wait.reset();
     let mut say = |s: &str| app.push_line(&english_job_line(s));
-    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, Some(&app.renewal_wait), &mut say).await;
+    let register_missing = app.auto_renew.lock().unwrap_or_else(|e| e.into_inner()).register_missing_app_ids;
+    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, register_missing, Some(&app.renewal_wait), &mut say).await;
     let ok = result.is_ok();
     let canceled = !ok && app.renewal_wait.is_canceled();
     let error = result.as_ref().err().map(|err| short_error(err));
@@ -2241,6 +2253,26 @@ mod tests {
         installed.clear();
         installed.insert("com.example.app.TEAM".to_string());
         assert!(install_identity_taken(&installed, "com.example.app", "com.example.app.TEAM"));
+    }
+
+    #[test]
+    fn missing_app_id_registration_is_opt_in_and_backward_compatible() {
+        let old: AutoRenewConfig = serde_json::from_str(
+            r#"{"enabled":true,"time":"06:30","min_days":3}"#
+        ).unwrap();
+        assert!(!old.register_missing_app_ids);
+        let enabled: AutoRenewConfig = serde_json::from_str(
+            r#"{"enabled":true,"time":"06:30","register_missing_app_ids":true}"#
+        ).unwrap();
+        assert!(enabled.register_missing_app_ids);
+        let old_req: AutoRenewReq = serde_json::from_str(
+            r#"{"enabled":true,"time":"06:30","min_days":3}"#
+        ).unwrap();
+        assert_eq!(old_req.register_missing_app_ids, None);
+        let new_req: AutoRenewReq = serde_json::from_str(
+            r#"{"enabled":true,"time":"06:30","min_days":3,"register_missing_app_ids":true}"#
+        ).unwrap();
+        assert_eq!(new_req.register_missing_app_ids, Some(true));
     }
 
     #[test]

@@ -80,6 +80,14 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
   Apple ID and its password on the server.
 - The two do not clash: `renew` looks at the newest profile on the phone. If AltStore renewed
   recently, `renew` does nothing and does not even sign in to Apple.
+- **Optional missing App ID recovery (default OFF):** In the web page's Automatic renewal
+  settings, enable **Auto-register missing App IDs on Apple** to let renewals recreate
+  App IDs for existing iPhone profiles of the configured Apple team. This
+  applies to manual web renewals and the daily schedule. CLI users may opt in
+  with `renew --register-missing-app-ids`. Apple limits free account App ID
+  registrations over seven days, so registration can fail until quota returns.
+  Newly registered IDs may lack the old app's entitlements and capabilities;
+  test apps with extensions carefully. Dry runs never register App IDs.
 - Old profiles stay on the phone after a renewal (iOS does not remove them), so you will see
   several profiles per app. That is expected. In AltServer mode it never removes profiles, even
   when AltStore asks (`activeProfiles`).

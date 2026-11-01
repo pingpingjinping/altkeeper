@@ -497,6 +497,23 @@ pub async fn app_ids(
         .map_err(|e| e.to_string())
 }
 
+/// Explicitly opted-in recovery of an App ID observed in this team's phone profiles.
+/// Creating IDs can consume a free Apple team's seven-day registration quota.
+pub async fn register_renewal_app_id(
+    sess: &mut DeveloperSession,
+    team: &DeveloperTeam,
+    identifier: &str,
+) -> Result<AppId, String> {
+    // Stable, short, identifier-derived label. isideload normalizes it for Apple.
+    let name = format!(
+        "AltKeeper{}",
+        identifier.rsplit('.').take(3).collect::<Vec<_>>().join("")
+    );
+    sess.add_app_id(team, &name, identifier, DeveloperDeviceType::Ios)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 pub async fn download_profile(
     sess: &mut DeveloperSession,
     team: &DeveloperTeam,
