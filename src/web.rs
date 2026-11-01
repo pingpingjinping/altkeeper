@@ -1454,7 +1454,7 @@ async fn run_renew(
 ) {
     app.renewal_wait.reset();
     let mut say = |s: &str| app.push_line(&english_job_line(s));
-    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, Some(&app.renewal_wait), &mut say).await;
+    let result = crate::cmd_renew(app.phone, false, force, min_days, bundle.as_deref(), installed_only, Some(&app.renewal_wait), Some(app.tfa.clone()), &mut say).await;
     let ok = result.is_ok();
     let canceled = !ok && app.renewal_wait.is_canceled();
     let error = result.as_ref().err().map(|err| short_error(err));
