@@ -5,7 +5,7 @@
 //!   altkeeper pair-usb [file]                     crea il pairing remoto via USB
 //!   altkeeper login <apple-id>                    accede e salva l'account
 //!   altkeeper apps                                elenca App ID e scadenze
-//!   altkeeper renew [--phone ip:porta] [--dry-run] [--force] [--min-days N] [--bundle ID] [--installed-only]
+//!   altkeeper renew [--phone ip:porta] [--dry-run] [--force] [--min-days N] [--bundle ID] [--installed-only] [--register-missing-app-ids]
 //!   altkeeper profile-remove <uuid> [--phone ip:porta]   toglie un profilo (ne salva prima una copia)
 //!   altkeeper profile-restore <file> [--phone ip:porta]  rimette un profilo salvato
 //!   altkeeper serve [--bind ip:porta] [--pin PIN] [--dir cartella] [--phone ip:porta]
@@ -241,6 +241,7 @@ async fn cmd_renew(
     min_days: i64,
     bundle_filter: Option<&str>,
     installed_only: bool,
+    register_missing_app_ids: bool,
     wait_control: Option<&renewal_wait::Control>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
@@ -356,12 +357,58 @@ async fn cmd_renew(
     apple::set_interactive(false);
     let mut sess = apple::open_session(Path::new("."), &acc.apple_id, &acc.password).await?;
     let team = apple::pick_team(&mut sess, Some(&team_id), false).await?;
-    let ids = apple::app_ids(&mut sess, &team).await?;
+    let (ids, mut available_quantity) = apple::app_ids_with_quota(&mut sess, &team).await?;
+    match available_quantity {
+        Some(n) => say(&format!("Apple reports {n} remaining App ID registration slot(s).")),
+        None => say("Apple did not report remaining App ID registration slots."),
+    }
 
     let mut done = 0;
     let mut missing_app_ids = Vec::new();
     for (bundle, days) in due {
-        let Some(app) = ids.iter().find(|a| a.identifier == bundle) else {
+        let app = if let Some(existing) = ids.iter().find(|a| a.identifier == bundle) {
+            existing.clone()
+        } else if register_missing_app_ids && apple::quota_exhausted(available_quantity) {
+            // Avoid futile Apple developer-service requests once the free-team quota
+            // is exhausted. Keep other registered apps renewing normally.
+            say(&format!("   {bundle}: no App ID and Apple reports no registration quota remaining; skipping"));
+            say(&format!("MISSING_APP_ID {bundle}"));
+            missing_app_ids.push(bundle);
+            continue;
+        } else if register_missing_app_ids && dry_run {
+            say(&format!("   {bundle}: expires in {days} days, WOULD REGISTER missing App ID (dry run)"));
+            // Simulate the quota consumption so previews of several missing IDs
+            // cannot promise more registrations than Apple currently allows.
+            if let Some(n) = available_quantity.as_mut() {
+                *n = n.saturating_sub(1);
+            }
+            continue;
+        } else if register_missing_app_ids {
+            // The candidate comes only from a profile belonging to the configured
+            // team, rather than from user input or stale Apple account data.
+            say(&format!("   {bundle}: App ID missing on Apple; attempting registration..."));
+            match apple::register_renewal_app_id(&mut sess, &team, bundle).await {
+                Ok(created) if created.identifier == bundle => {
+                    if let Some(n) = available_quantity.as_mut() {
+                        *n = n.saturating_sub(1);
+                    }
+                    say(&format!("   {bundle}: App ID registered successfully"));
+                    created
+                }
+                Ok(_) => {
+                    say(&format!("   {bundle}: Apple returned a different App ID, skipping"));
+                    say(&format!("MISSING_APP_ID {bundle}"));
+                    missing_app_ids.push(bundle);
+                    continue;
+                }
+                Err(error) => {
+                    say(&format!("   {bundle}: App ID registration failed: {error}"));
+                    say(&format!("MISSING_APP_ID {bundle}"));
+                    missing_app_ids.push(bundle);
+                    continue;
+                }
+            }
+        } else {
             say(&format!("   {bundle}: no matching App ID on Apple, skipping"));
             say(&format!("MISSING_APP_ID {bundle}"));
             missing_app_ids.push(bundle);
@@ -372,7 +419,7 @@ async fn cmd_renew(
             continue;
         }
         say(&format!("   {bundle}: expires in {days} days, downloading a new profile..."));
-        let new = apple::download_profile(&mut sess, &team, app).await?;
+        let new = apple::download_profile(&mut sess, &team, &app).await?;
         say(&crate::tr!(format!("      nuovo profilo valido fino al {}", new.date_expire.to_xml_format()), format!("      new profile valid until {}", new.date_expire.to_xml_format())));
         let bytes: Vec<u8> = new.encoded_profile.into();
         let expected = profile::parse(&bytes)
@@ -611,6 +658,7 @@ async fn run() -> Result<(), String> {
                 min_days,
                 bundle.as_deref(),
                 installed_only,
+                flag("--register-missing-app-ids"),
                 None,
                 &mut |s| println!("{s}"),
             )
