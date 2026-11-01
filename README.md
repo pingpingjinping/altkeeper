@@ -74,6 +74,11 @@ and server logs, **not** the HTML web page, protocol or JSON. The same 2FA menu 
 - Renews the provisioning profiles of your apps (and, in AltServer mode, installs the apps AltStore
   sends it). The renewal flow does not re-sign apps or create/revoke certificates. Installing an
   IPA uploaded from the web page does sign it and may create a development certificate.
+- When Apple requests a two-factor code during a **web-started or scheduled**
+  renewal, the dashboard shows the existing 6-digit verification form. The
+  Apple authentication wait times out after five minutes without a response.
+  CLI renewals remain unattended and fail if interactive 2FA is required;
+  existing scheduled retry/Discord failure-notification behavior is unchanged.
 - **AltServer mode does not need your Apple ID on the server.** AltStore signs in on the iPhone;
   this program only gives it anisette data and installs what AltStore sends. The unattended renewal
   (`renew`, cron, and the web page's renew action) and signing an IPA from the web page do need the

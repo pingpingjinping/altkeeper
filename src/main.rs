@@ -243,6 +243,7 @@ async fn cmd_renew(
     installed_only: bool,
     register_missing_app_ids: bool,
     wait_control: Option<&renewal_wait::Control>,
+    tfa: Option<std::sync::Arc<apple::TfaChannel>>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let acc = apple::load_account(Path::new("."))?;
@@ -354,8 +355,15 @@ async fn cmd_renew(
     }
 
     say("Signing in to Apple...");
-    apple::set_interactive(false);
-    let mut sess = apple::open_session(Path::new("."), &acc.apple_id, &acc.password).await?;
+    // Keep CLI renewal noninteractive. Web jobs share the existing verification
+    // channel used by browser sign-in and IPA installation.
+    let mut sess = if let Some(channel) = tfa {
+        say("Apple may request two-factor authentication; enter the code in the web dashboard.");
+        apple::open_session_web(Path::new("."), &acc.apple_id, &acc.password, channel).await?
+    } else {
+        apple::set_interactive(false);
+        apple::open_session(Path::new("."), &acc.apple_id, &acc.password).await?
+    };
     let team = apple::pick_team(&mut sess, Some(&team_id), false).await?;
     let (ids, mut available_quantity) = apple::app_ids_with_quota(&mut sess, &team).await?;
     match available_quantity {
@@ -659,6 +667,7 @@ async fn run() -> Result<(), String> {
                 bundle.as_deref(),
                 installed_only,
                 flag("--register-missing-app-ids"),
+                None,
                 None,
                 &mut |s| println!("{s}"),
             )
