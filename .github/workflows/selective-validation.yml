@@ -18,7 +18,7 @@ jobs:
       - run: node scripts/check-web-ui.cjs
       - run: cargo test --locked
       # Dependency unit tests are not included in the root cargo test invocation.
-      - run: cargo test --locked -p isideload --lib --no-default-features --features install,fs-storage,tokio-mt
+      - run: cargo test --locked -p isideload --lib
   docker-build:
     strategy:
       fail-fast: false
