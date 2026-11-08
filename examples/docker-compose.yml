@@ -15,7 +15,11 @@ services:
     volumes:
       - /srv/altkeeper:/data
     environment:
-      - TZ=Europe/Rome
+      - TZ=Asia/Seoul
+      # Anisette remains external until explicitly changed in the dashboard.
+      # Do not publish port 8788: the optional local V3 server binds only 127.0.0.1.
+      # Existing ALTKEEPER_ANISETTE_URL overrides still take precedence.
+      # - ALTKEEPER_ANISETTE_URL=https://ani.jkcoxson.com
       # - ALTKEEPER_LANG=en
       - ALTKEEPER_WEB_PIN=${ALTKEEPER_WEB_PIN:?imposta ALTKEEPER_WEB_PIN in .env}
     command: ["serve", "--bind", "0.0.0.0:8787", "--altserver"]

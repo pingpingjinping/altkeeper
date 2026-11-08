@@ -698,7 +698,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
             "next_run": next_scheduled,
         },
         "anisette": match anisette {
-            Ok(choice) => json!({ "url": choice.url, "source": choice.source, "locked": choice.locked }),
+            Ok(choice) => json!({ "url": choice.url, "source": choice.source, "locked": choice.locked, "local": crate::anisette_server::status_json() }),
             Err(error) => json!({ "error": error, "locked": true }),
         },
         "account": {
@@ -797,7 +797,14 @@ async fn update_anisette(
         return json_err(StatusCode::BAD_REQUEST, "Supply a complete http(s) Anisette URL.");
     }
     match apple::save_anisette_choice(Path::new("."), if req.clear { None } else { req.url.as_deref() }) {
-        Ok(choice) => (StatusCode::OK, Json(json!({ "ok": true, "url": choice.url }))),
+        Ok(choice) => {
+            if choice.url == apple::LOCAL_ANISETTE_URL {
+                if let Err(error) = crate::anisette_server::ensure_started(Path::new(".")) {
+                    return json_err(StatusCode::INTERNAL_SERVER_ERROR, &error);
+                }
+            }
+            (StatusCode::OK, Json(json!({ "ok": true, "url": choice.url })))
+        },
         Err(error) => json_err(StatusCode::BAD_REQUEST, &error),
     }
 }

@@ -1,0 +1,46 @@
+name: local-anisette-native-smoke
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docker-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: node scripts/check-local-anisette.cjs
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: altkeeper-validation:local
+          cache-from: type=gha,scope=altkeeper-pr-${{ matrix.platform }}
+          cache-to: type=gha,scope=altkeeper-pr-${{ matrix.platform }},mode=max
+      - name: Smoke test native Anisette download and loader (no Apple account)
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker logs anisette-smoke; docker rm -f anisette-smoke' EXIT
+          docker run -di --name anisette-smoke altkeeper-validation:local __anisette-local-worker
+          for attempt in $(seq 1 48); do
+            if docker exec anisette-smoke curl -fsS http://127.0.0.1:8788/v3/client_info; then
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' anisette-smoke)" != true ]; then
+              exit 1
+            fi
+            sleep 5
+          done
+          exit 1

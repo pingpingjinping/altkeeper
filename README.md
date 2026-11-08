@@ -809,3 +809,12 @@ CLI operations and Keeper's built-in AltServer use the same candidates. Clear th
 field and save to remove manual entries while keeping automatic discovery.
 Only numeric IP addresses and nonzero ports are accepted; existing pairing still
 has to authenticate the phone. Saving an address neither renews nor installs apps.
+
+### Optional built-in Anisette V3
+
+Existing external settings and `https://ani.jkcoxson.com` remain the default.
+The dashboard now offers external, local, and custom URL choices. Local mode is
+explicit opt-in and binds only `127.0.0.1:8788`; it never falls back automatically.
+See [setup, data compatibility and security review](docs/LOCAL_ANISETTE.md) and
+[third-party notices](THIRD-PARTY-NOTICES.md), including the unresolved loader license
+that must be clarified before distributing production binaries/images.
