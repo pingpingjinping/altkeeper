@@ -80,7 +80,11 @@ struct Snapshot {
     profiles_total: usize,
     apps: Vec<AppView>,
     profiles: Vec<ProfileView>,
+    jit_apps: Vec<JitAppView>,
 }
+
+#[derive(Clone)]
+struct JitAppView { pid: u32, name: String, real_app_name: String }
 
 #[derive(Clone, PartialEq, Debug)]
 struct AppView {
@@ -433,6 +437,8 @@ pub async fn serve(
         .route("/api/state", get(state))
         .route("/api/logs", get(logs))
         .route("/api/check", post(check))
+        .route("/api/jit/apps", post(load_jit_apps))
+        .route("/api/jit/enable", post(enable_jit))
         .route("/api/phone-addresses", post(update_phone_addresses))
         .route("/api/renew", post(renew))
         .route("/api/renew/cancel-wait", post(cancel_renew_wait))
@@ -701,6 +707,9 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
             Ok(choice) => json!({ "url": choice.url, "source": choice.source, "locked": choice.locked }),
             Err(error) => json!({ "error": error, "locked": true }),
         },
+        "jit_apps": g.snapshot.jit_apps.iter().map(|process| json!({
+            "pid": process.pid, "name": process.name, "real_app_name": process.real_app_name
+        })).collect::<Vec<_>>(),
         "account": {
             "present": account.is_some(),
             "apple_id": account.as_ref().map(|a| a.apple_id.clone()),
@@ -775,6 +784,116 @@ async fn update_phone_addresses(Json(req): Json<PhoneAddressesReq>) -> (StatusCo
         }))),
         Err(error) => json_err(StatusCode::INTERNAL_SERVER_ERROR, &format!("Cannot save iPhone addresses: {error}")),
     }
+}
+
+async fn load_jit_apps(State(app): State<Arc<App>>) -> (StatusCode, Json<Value>) {
+    let Some(guard) = try_busy(&app) else {
+        return json_err(StatusCode::CONFLICT, BUSY_MSG);
+    };
+    app.lock().job = JobView {
+        kind: "jit_apps".into(),
+        running: true,
+        lines: vec!["Reading apps currently running on the iPhone…".into()],
+        ok: None,
+    };
+    spawn_job(guard, run_load_jit_apps);
+    json_ok()
+}
+
+async fn run_load_jit_apps(app: Arc<App>) {
+    let _work = crate::altserver::phone_lock();
+    let result = phone::with_timeout("Listing running apps", Duration::from_secs(45), async {
+        let (_, mut link) =
+            phone::connect_auto(app.phone, PAIRING_FILE, |_: &str| {}).await?;
+        link.running_apps().await
+    })
+    .await;
+    let mut g = app.lock();
+    match result {
+        Ok(mut processes) => {
+            processes.sort_by(|left, right| {
+                left.real_app_name
+                    .cmp(&right.real_app_name)
+                    .then_with(|| left.name.cmp(&right.name))
+                    .then_with(|| left.pid.cmp(&right.pid))
+            });
+            g.snapshot.jit_apps = processes
+                .into_iter()
+                .map(|process| JitAppView {
+                    pid: process.pid,
+                    name: process.name,
+                    real_app_name: process.real_app_name,
+                })
+                .collect();
+            let count = g.snapshot.jit_apps.len();
+            g.job.lines.push(format!("Found {} running app(s).", count));
+            g.job.ok = Some(true);
+        }
+        Err(error) => {
+            g.snapshot.jit_apps.clear();
+            g.job.lines.push(format!("Error: {}", short_error(&error)));
+            g.job.ok = Some(false);
+        }
+    }
+    g.job.running = false;
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnableJitReq {
+    pid: u32,
+}
+
+async fn enable_jit(
+    State(app): State<Arc<App>>,
+    Json(req): Json<EnableJitReq>,
+) -> (StatusCode, Json<Value>) {
+    if req.pid == 0
+        || !app
+            .lock()
+            .snapshot
+            .jit_apps
+            .iter()
+            .any(|process| process.pid == req.pid)
+    {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            "Refresh the running-app list and select an app.",
+        );
+    }
+    let Some(guard) = try_busy(&app) else {
+        return json_err(StatusCode::CONFLICT, BUSY_MSG);
+    };
+    app.lock().job = JobView {
+        kind: "jit_enable".into(),
+        running: true,
+        lines: vec![format!("Enabling JIT for process {}…", req.pid)],
+        ok: None,
+    };
+    spawn_job(guard, move |app| run_enable_jit(app, req.pid));
+    json_ok()
+}
+
+async fn run_enable_jit(app: Arc<App>, pid: u32) {
+    let _work = crate::altserver::phone_lock();
+    let result = phone::with_timeout("Enabling JIT", Duration::from_secs(60), async {
+        let (_, mut link) =
+            phone::connect_auto(app.phone, PAIRING_FILE, |_: &str| {}).await?;
+        link.enable_jit(pid).await
+    })
+    .await;
+    let mut g = app.lock();
+    match result {
+        Ok(()) => {
+            g.job.lines.push(format!("JIT enabled for process {pid}."));
+            g.job.ok = Some(true);
+        }
+        Err(error) => {
+            g.job.lines.push(format!("Error: {}", short_error(&error)));
+            g.job.ok = Some(false);
+        }
+    }
+    g.job.running = false;
 }
 
 #[derive(Deserialize)]
@@ -2616,3 +2735,25 @@ esito: 0
 }
 
 
+
+#[cfg(test)]
+mod jit_web_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stale_or_zero_pid_is_rejected_before_connecting_to_the_phone() {
+        let app = Arc::new(App {
+            pin: None, phone: None, busy: AtomicBool::new(false),
+            inner: Mutex::new(Inner::default()), tfa: Arc::new(apple::TfaChannel::default()),
+            auto_renew: Mutex::new(AutoRenewConfig::default()), pending_ipa: Mutex::new(None),
+            renewal_wait: crate::renewal_wait::Control::default(),
+        });
+        for pid in [0, 42] {
+            let (status, _) = enable_jit(State(app.clone()), Json(EnableJitReq { pid })).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!app.busy.load(Ordering::SeqCst));
+        }
+        for input in [r#"{"pid":-1}"#, r#"{"pid":4294967296}"#, r#"{"pid":42,"force":true}"#] {
+            assert!(serde_json::from_str::<EnableJitReq>(input).is_err());
+        }
+    }
+}

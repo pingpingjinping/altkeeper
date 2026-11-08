@@ -247,6 +247,18 @@
   </section>
 
   <section class="card">
+    <h2 data-i18n="Enable JIT">Enable JIT</h2>
+    <p class="muted" data-i18n="Open the app on your iPhone, refresh the list, then select it. iOS 17+, Developer Mode and a mounted Developer Disk Image are required.">Open the app on your iPhone, refresh the list, then select it. iOS 17+, Developer Mode and a mounted Developer Disk Image are required.</p>
+    <div class="row action-row">
+      <button type="button" id="jit-refresh" data-i18n="Refresh running apps">Refresh running apps</button>
+    </div>
+    <label for="jit-app" data-i18n="Running app">Running app</label>
+    <select id="jit-app"><option value="" data-i18n="Select an app">Select an app</option></select>
+    <button type="button" id="jit-enable" data-i18n="Enable JIT" disabled>Enable JIT</button>
+    <div class="banner" id="jit-result" role="status" aria-live="polite" hidden></div>
+  </section>
+
+  <section class="card">
     <h2 data-i18n="Provisioning profiles on iPhone">Provisioning profiles on iPhone</h2>
     <p class="muted" data-i18n="Old profiles may remain after renewal. Deleting a profile still needed by an installed app can stop it opening. A verified server-side backup is saved before removal.">Old profiles may remain after renewal. Deleting a profile still needed by an installed app can stop it opening. A verified server-side backup is saved before removal.</p>
     <p class="muted" id="profiles-empty" hidden></p>
@@ -375,6 +387,12 @@ Object.assign(KO, {
   "Stopping the wait…": "대기를 취소하는 중입니다…",
   "Waiting canceled. A profile already sent to the iPhone may still install.": "대기를 취소했습니다. 이미 아이폰에 전송된 프로파일은 설치될 수 있습니다.",
   "No iPhone response wait is active.": "현재 아이폰 응답을 기다리는 작업이 없습니다."
+});
+Object.assign(KO, {
+  "Enable JIT": "JIT 활성화",
+  "Refresh running apps": "실행 중인 앱 새로고침",
+  "Running app": "실행 중인 앱", "Select an app": "앱을 선택하세요",
+  "Open the app on your iPhone, refresh the list, then select it. iOS 17+, Developer Mode and a mounted Developer Disk Image are required.": "아이폰에서 앱을 열고 목록을 새로고침한 뒤 선택하세요. iOS 17 이상, 개발자 모드와 마운트된 개발자 디스크 이미지가 필요합니다.",
 });
 let locale = "ko";
 try { locale = localStorage.getItem("altkeeper-language") === "en" ? "en" : "ko"; } catch (_) {}
@@ -640,6 +658,26 @@ function render(s) {
       t("Preview only: final renewal also verifies installed apps on the iPhone. If installed-app lookup fails, all known team profiles are renewed."))));
   }
 
+  const jitApps = s.jit_apps || [];
+  const jitSignature = JSON.stringify(jitApps);
+  if ($("jit-app").dataset.signature !== jitSignature) {
+    const selected = $("jit-app").value;
+    $("jit-app").replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = ""; placeholder.textContent = t("Select an app");
+    $("jit-app").appendChild(placeholder);
+    for (const app of jitApps) {
+      const option = document.createElement("option");
+      option.value = String(app.pid);
+      option.textContent = (app.real_app_name || app.name) + " (" + app.pid + ")";
+      $("jit-app").appendChild(option);
+    }
+    if (jitApps.some(app => String(app.pid) === selected)) $("jit-app").value = selected;
+    $("jit-app").dataset.signature = jitSignature;
+  }
+  $("jit-refresh").disabled = !!s.busy;
+  $("jit-app").disabled = !!s.busy;
+  $("jit-enable").disabled = !!s.busy || !$("jit-app").value;
   const anisette = s.anisette || {};
   if (!anisetteDraftDirty && typeof anisette.url === "string") $("anisette-url").value = anisette.url;
   $("anisette-source").textContent = anisette.error || (t("Current source: ") + (anisette.source || "-"));
@@ -883,6 +921,19 @@ $("discord-clear").onclick = () => {
   if (confirm(t("Remove the saved Discord webhook?"))) {
     act(() => api("/api/discord", {clear:true}), "discord-error");
   }
+};
+$("jit-app").onchange = () => { $("jit-enable").disabled = !!(state && state.busy) || !$("jit-app").value; };
+$("jit-refresh").onclick = async () => {
+  banner("jit-result", "");
+  try { await api("/api/jit/apps", {}); }
+  catch (e) { banner("jit-result", e.message, "bad"); }
+  await refresh();
+};
+$("jit-enable").onclick = async () => {
+  banner("jit-result", "");
+  try { await api("/api/jit/enable", {pid: Number($("jit-app").value)}); }
+  catch (e) { banner("jit-result", e.message, "bad"); }
+  await refresh();
 };
 $("discord-test").onclick = async () => {
   banner("discord-test-result", "");

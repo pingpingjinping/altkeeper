@@ -18,6 +18,8 @@ idevice = { version = "0.1.68", default-features = false, features = [
   "core_device_proxy",
   "misagent",
   "installation_proxy",
+  "device_info",
+  "debug_proxy",
   "afc",
   "usbmuxd",
 ] }
