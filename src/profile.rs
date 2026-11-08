@@ -52,6 +52,15 @@ fn extension_of(bundle: &str, parent: &str, team: &str) -> bool {
     let Some(suffix) = child_id.strip_prefix(parent_id).and_then(|s| s.strip_prefix('.')) else {
         return false;
     };
+    // Only AltStore's exact legacy host gets direct-child widget grouping.
+    // Do not group arbitrary dotted app IDs merely because they share a prefix.
+    if !team.is_empty()
+        && parent_id == format!("com.{team}.com.rileytestut.AltStore")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return true;
+    }
     let Some((marker, extension_name)) = suffix.split_once('.') else {
         return false;
     };
@@ -406,3 +415,18 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod altstore_compat_tests {
+    use super::*;
+    #[test]
+    fn only_exact_legacy_altstore_host_groups_direct_child() {
+        let ids = ["com.NEWTEAM123.com.rileytestut.AltStore", "com.NEWTEAM123.com.rileytestut.AltStore.AltWidget",
+            "com.NEWTEAM123.com.example.App", "com.NEWTEAM123.com.example.App.Widget",
+            "com.OTHERTEAM1.com.rileytestut.AltStore", "com.OTHERTEAM1.com.rileytestut.AltStore.AltWidget"];
+        assert_eq!(group_root(ids[1], &ids, "NEWTEAM123"), ids[0]);
+        assert_eq!(members_of_group(ids[0], &ids, "NEWTEAM123"), vec![ids[0], ids[1]]);
+        assert_eq!(group_root(ids[3], &ids, "NEWTEAM123"), ids[3]);
+        assert_eq!(group_root(ids[5], &ids, "NEWTEAM123"), ids[5]);
+    }
+}
