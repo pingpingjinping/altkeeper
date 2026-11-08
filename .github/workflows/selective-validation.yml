@@ -1,0 +1,41 @@
+name: selective-update-validation
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: node scripts/check-web-ui.cjs
+      - run: cargo test --locked
+      # Dependency unit tests are not included in the root cargo test invocation.
+      - run: cargo test --locked -p isideload --lib --no-default-features --features install,fs-storage,tokio-mt
+  docker-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=altkeeper-pr-${{ matrix.platform }}
+          cache-to: type=gha,scope=altkeeper-pr-${{ matrix.platform }},mode=max
