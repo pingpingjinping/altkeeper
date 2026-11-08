@@ -25,6 +25,7 @@ use crate::phone::dbg;
 
 const ACCOUNT_FILE: &str = "account.json";
 const STATE_DIR: &str = "state";
+pub const LOCAL_ANISETTE_URL: &str = "http://127.0.0.1:8788";
 const ANISETTE_URL_FILE: &str = "anisette-url";
 const ANISETTE_EFFECTIVE_URL_FILE: &str = "anisette-effective-url";
 
@@ -204,6 +205,10 @@ pub async fn test_anisette_client_info(dir: &Path, candidate: Option<&str>) -> R
         Some(raw) => anisette_url(Some(raw))?.ok_or("Supply an Anisette URL.")?,
         None => choice.url,
     };
+    if url == LOCAL_ANISETTE_URL {
+        crate::anisette_server::ensure_started(dir)?;
+        crate::anisette_server::require_ready(dir)?;
+    }
     let provider = RemoteV3AnisetteProvider::default()
         .map_err(|e| e.to_string())?.set_url(&url);
     tokio::time::timeout(Duration::from_secs(12), provider.get_client_info())
@@ -220,6 +225,14 @@ fn anisette_provider(dir: &Path) -> Result<RemoteV3AnisetteProvider, String> {
     std::fs::create_dir_all(&state).map_err(dbg)?;
     crate::fsperm::restrict_dir(&state).map_err(dbg)?;
     let choice = anisette_choice(dir)?;
+    // CLI commands may use the loopback server of an already running `serve`
+    // process. They must not start a short-lived worker that dies as soon as
+    // their first authentication returns a "starting" error.
+    if choice.url == LOCAL_ANISETTE_URL
+        && !matches!(crate::anisette_server::local_status(), crate::anisette_server::LocalStatus::Stopped)
+    {
+        crate::anisette_server::require_ready(dir)?;
+    }
     // On the first run of an upgraded installation no marker exists: preserve
     // the previously saved identity rather than invalidating it needlessly.
     let marker = state.join(ANISETTE_EFFECTIVE_URL_FILE);
@@ -745,3 +758,28 @@ pub async fn sign_ipa(
     })
 }
 
+
+#[cfg(test)]
+mod local_choice_tests {
+    use super::*;
+    #[test]
+    fn upgrade_preserves_external_identity_and_explicit_switches_retire_it() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join(STATE_DIR);
+        std::fs::create_dir(&state).unwrap();
+        let identity = state.join("anisette_state");
+        std::fs::write(&identity, b"existing external identity").unwrap();
+        assert_eq!(anisette_choice(dir.path()).unwrap().url, "https://ani.jkcoxson.com");
+        let _provider = anisette_provider(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&identity).unwrap(), b"existing external identity");
+        save_anisette_choice(dir.path(), Some(LOCAL_ANISETTE_URL)).unwrap();
+        assert!(!identity.exists());
+        assert_eq!(std::fs::read(state.join("anisette_state.stale")).unwrap(), b"existing external identity");
+        std::fs::write(&identity, b"local identity").unwrap();
+        save_anisette_choice(dir.path(), None).unwrap();
+        assert!(!identity.exists());
+        assert_eq!(std::fs::read(state.join("anisette_state.stale")).unwrap(), b"local identity");
+        assert_eq!(anisette_choice(dir.path()).unwrap().url, "https://ani.jkcoxson.com");
+    }
+}

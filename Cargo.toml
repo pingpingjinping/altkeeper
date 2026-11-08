@@ -8,7 +8,7 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "multipart"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "multipart", "ws"] }
 idevice = { version = "0.1.68", default-features = false, features = [
   "ring",
   "remote_pairing",
@@ -40,6 +40,14 @@ tempfile = "3.27"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+base64 = "0.21"
+hex = "0.4"
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+omnisette = { path = "vendor/omnisette", default-features = false, features = ["async", "remote-anisette"] }
+sha2 = "0.10"
+uuid = "1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 
@@ -54,3 +62,7 @@ opt-level = "s"
 lto = true
 strip = true
 
+
+# Upstream v0.5.6 pins this loader fix to avoid xmas-elf 0.9 (RUSTSEC-2025-0018).
+[patch."https://github.com/Dadoum/android-loader"]
+android-loader = { git = "https://github.com/BartolomeoRusso9/android-loader", rev = "96ed02b2aee91d7854dcb4b75a17e4288f40ab94" }

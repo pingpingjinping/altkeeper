@@ -33,6 +33,7 @@ mod profile;
 mod renewal_wait;
 mod terminal;
 mod web;
+mod anisette_server;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -621,6 +622,20 @@ async fn run() -> Result<(), String> {
         return Err(crate::tr!(USAGE, USAGE_EN).into());
     }
     let cmd = args.remove(0);
+    if cmd == "__anisette-local-worker" {
+        if args.iter().any(|arg| arg == "--supervised") {
+            // Parent holds stdin open; EOF also stops the native worker after an abrupt parent exit.
+            std::thread::spawn(|| {
+                let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+                std::process::exit(0);
+            });
+        }
+        anisette_server::serve_default(std::env::current_dir().map_err(dbg)?).await;
+        return match anisette_server::local_status() {
+            anisette_server::LocalStatus::Unavailable(reason) => Err(reason),
+            _ => Ok(()),
+        };
+    }
     let flag = |name: &str| args.iter().any(|a| a == name);
     let opt = |name: &str| {
         args.iter()
@@ -689,6 +704,9 @@ async fn run() -> Result<(), String> {
             web::check_options(bind, &pin)?;
             log::init(Path::new("."));
             apple::anisette_url(env::var("ANISETTE_URL").as_deref())?;
+            if apple::anisette_choice(Path::new("."))?.url == apple::LOCAL_ANISETTE_URL {
+                anisette_server::ensure_started(Path::new("."))?;
+            }
             if flag("--altserver") {
                 let port = altserver::start(altserver_port(opt("--altserver-port"))?, phone)?;
                 start_dnssd(&opt, port)?;
@@ -703,6 +721,9 @@ async fn run() -> Result<(), String> {
             }
             log::init(Path::new("."));
             apple::anisette_url(env::var("ANISETTE_URL").as_deref())?;
+            if apple::anisette_choice(Path::new("."))?.url == apple::LOCAL_ANISETTE_URL {
+                anisette_server::ensure_started(Path::new("."))?;
+            }
             let port = altserver::start(altserver_port(opt("--port"))?, phone_addr(opt("--phone"))?)?;
             start_dnssd(&opt, port)?;
             log::line(crate::tr!("AltServer attivo. Ctrl-C per fermarlo.", "AltServer running. Press Ctrl-C to stop."));
