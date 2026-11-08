@@ -731,7 +731,8 @@ pub async fn sign_ipa(
             false,
             None::<fn(f32) -> std::future::Ready<()>>,
             None,
-            None,
+            // Use the same device registered above for AltStore's self refresh metadata.
+            Some(udid),
             selected_extensions,
             display_name,
             custom_bundle_id,
