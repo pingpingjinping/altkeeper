@@ -16,6 +16,9 @@ Save a choice, wait for local status **running**, then test the connection.
 The first local start downloads an Apple Music APK (bounded to 256 MiB; allow disk
 space for the temporary APK). A connection test requests only `/v3/client_info`;
 it does not verify Apple provisioning or login. First local login can require 2FA.
+CLI login/renew commands use the local endpoint provided by a running `serve`
+process; keep that service running when using local mode from the CLI. They do not
+start a transient native worker of their own.
 The environment variable ALTKEEPER_ANISETTE_URL still takes precedence and locks
 web changes. Clearing restores the existing default external server.
 

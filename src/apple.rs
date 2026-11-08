@@ -225,7 +225,14 @@ fn anisette_provider(dir: &Path) -> Result<RemoteV3AnisetteProvider, String> {
     std::fs::create_dir_all(&state).map_err(dbg)?;
     crate::fsperm::restrict_dir(&state).map_err(dbg)?;
     let choice = anisette_choice(dir)?;
-    if choice.url == LOCAL_ANISETTE_URL { crate::anisette_server::require_ready(dir)?; }
+    // CLI commands may use the loopback server of an already running `serve`
+    // process. They must not start a short-lived worker that dies as soon as
+    // their first authentication returns a "starting" error.
+    if choice.url == LOCAL_ANISETTE_URL
+        && !matches!(crate::anisette_server::local_status(), crate::anisette_server::LocalStatus::Stopped)
+    {
+        crate::anisette_server::require_ready(dir)?;
+    }
     // On the first run of an upgraded installation no marker exists: preserve
     // the previously saved identity rather than invalidating it needlessly.
     let marker = state.join(ANISETTE_EFFECTIVE_URL_FILE);

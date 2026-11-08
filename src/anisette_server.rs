@@ -300,7 +300,7 @@ pub fn ensure_started(data_dir: &Path) -> Result<(), String> {
 }
 
 pub fn require_ready(data_dir: &Path) -> Result<(), String> {
-    if matches!(local_status(), LocalStatus::Stopped) { ensure_started(data_dir)?; }
+    let _ = data_dir;
     match local_status() {
         LocalStatus::Running => Ok(()),
         LocalStatus::Unavailable(reason) => Err(format!("Local Anisette unavailable: {reason}. Select the external server to revert.")),
