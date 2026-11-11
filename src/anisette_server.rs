@@ -34,11 +34,64 @@ const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const SESSION_MAX_DURATION: Duration = Duration::from_secs(300);
 
+// Opt-in compatibility probes for Apple authentication. Native CoreADI provisioning
+// is unchanged; these values control only the V3 metadata returned to clients.
+const LEGACY_MAC_CLIENT_INFO: &str =
+    "<MacBookPro13,3> <Mac OS X;10.12.6;16G29> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+const LEGACY_MAC_USER_AGENT: &str = "akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0";
+const WINDOWS_COMPAT_CLIENT_INFO: &str =
+    "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalClientProfile {
+    Native,
+    LegacyMac,
+    WindowsCompat,
+}
+
+impl LocalClientProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "native" => Ok(Self::Native),
+            "legacy-mac" => Ok(Self::LegacyMac),
+            "windows-compat" => Ok(Self::WindowsCompat),
+            other => Err(format!(
+                "Invalid ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE '{other}'. Expected native, legacy-mac or windows-compat."
+            )),
+        }
+    }
+
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE") {
+            Ok(value) => Self::parse(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Native),
+            Err(error) => Err(format!("Invalid local Anisette client profile environment: {error}")),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::LegacyMac => "legacy-mac",
+            Self::WindowsCompat => "windows-compat",
+        }
+    }
+
+    fn values(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Native => (CLIENT_INFO_HEADER, AKD_USER_AGENT),
+            Self::LegacyMac => (LEGACY_MAC_CLIENT_INFO, LEGACY_MAC_USER_AGENT),
+            Self::WindowsCompat => (WINDOWS_COMPAT_CLIENT_INFO, AKD_USER_AGENT),
+        }
+    }
+}
+
 type Provider = ADIProxyAnisetteProvider<StoreServicesCoreADIProxy<'static>>;
 
 struct Engine {
     libraries: PathBuf,
     provisioning_root: PathBuf,
+    auth_profile: LocalClientProfile,
     serial: tokio::sync::Mutex<()>,
     sequence: std::sync::atomic::AtomicU64,
 }
@@ -63,7 +116,7 @@ impl Drop for TemporaryProvisioningDir {
 }
 
 impl Engine {
-    fn new(libraries: PathBuf, data_dir: &Path) -> Result<Self, String> {
+    fn new(libraries: PathBuf, data_dir: &Path, auth_profile: LocalClientProfile) -> Result<Self, String> {
         let architecture = match std::env::consts::ARCH {
             "x86_64" => "x86_64",
             "x86" => "x86",
@@ -103,6 +156,7 @@ impl Engine {
         Ok(Self {
             libraries,
             provisioning_root,
+            auth_profile,
             serial: tokio::sync::Mutex::new(()),
             sequence: std::sync::atomic::AtomicU64::new(0),
         })
@@ -354,7 +408,8 @@ pub async fn serve(
     // Risponde anche a http://127.0.0.1:8788 (la voce "AltKeeper local server") se ascolta lì
     // o su tutte le interfacce, sulla porta 8788.
     let local = bind.port() == 8788 && (bind.ip().is_loopback() || bind.ip().is_unspecified());
-    let engine = Arc::new(Engine::new(libraries, &data_dir)?);
+    let auth_profile = LocalClientProfile::from_env()?;
+    let engine = Arc::new(Engine::new(libraries, &data_dir, auth_profile)?);
     // Load and validate the native engine before reporting readiness.
     let probe = engine.provider([0; IDENTIFIER_LENGTH], None)?;
     drop(probe);
@@ -377,6 +432,7 @@ pub async fn serve(
         ))
     });
     println!("ALTKEEPER_ANISETTE_READY");
+    crate::log::line(&format!("[anisette-local] V3 client profile: {} (native CoreADI provisioning unchanged)", auth_profile.name()));
     crate::log::line(&format!(
         "[anisette-local] V3 server listening at http://{bind}. This protocol has no authentication or TLS; restrict network access."
     ));
@@ -385,15 +441,16 @@ pub async fn serve(
         .map_err(|error| format!("Local Anisette server failed: {error}"))
 }
 
-fn client_info_body() -> Value {
+fn client_info_body(profile: LocalClientProfile) -> Value {
+    let (client_info, user_agent) = profile.values();
     json!({
-        "client_info": CLIENT_INFO_HEADER,
-        "user_agent": AKD_USER_AGENT,
+        "client_info": client_info,
+        "user_agent": user_agent,
     })
 }
 
-async fn client_info() -> Json<Value> {
-    Json(client_info_body())
+async fn client_info(State(engine): State<Arc<Engine>>) -> Json<Value> {
+    Json(client_info_body(engine.auth_profile))
 }
 
 #[derive(Deserialize)]
@@ -897,9 +954,27 @@ mod tests {
 
     #[test]
     fn client_info_matches_v3_shape() {
-        let value = client_info_body();
-        assert!(value["client_info"].as_str().is_some_and(|s| !s.is_empty()));
-        assert!(value["user_agent"].as_str().is_some_and(|s| !s.is_empty()));
+        for profile in [LocalClientProfile::Native, LocalClientProfile::LegacyMac, LocalClientProfile::WindowsCompat] {
+            let value = client_info_body(profile);
+            assert!(value["client_info"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(value["user_agent"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+    }
+
+    #[test]
+    fn client_profiles_are_explicit_and_native_remains_unchanged() {
+        assert_eq!(LocalClientProfile::parse("native").unwrap(), LocalClientProfile::Native);
+        assert_eq!(LocalClientProfile::parse("legacy-mac").unwrap(), LocalClientProfile::LegacyMac);
+        assert_eq!(LocalClientProfile::parse("windows-compat").unwrap(), LocalClientProfile::WindowsCompat);
+        assert!(LocalClientProfile::parse("").is_err());
+        assert!(LocalClientProfile::parse("other").is_err());
+        let native = client_info_body(LocalClientProfile::Native);
+        assert_eq!(native["client_info"].as_str(), Some(CLIENT_INFO_HEADER));
+        assert_eq!(native["user_agent"].as_str(), Some(AKD_USER_AGENT));
+        let mac = client_info_body(LocalClientProfile::LegacyMac);
+        assert!(mac["client_info"].as_str().unwrap().contains("MacBookPro13,3"));
+        let windows = client_info_body(LocalClientProfile::WindowsCompat);
+        assert!(windows["client_info"].as_str().unwrap().contains("<PC> <Windows;"));
     }
 
     #[test]
