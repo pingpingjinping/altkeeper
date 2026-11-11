@@ -105,3 +105,41 @@ restart with saved local identity, external rollback, network/download failure a
 unlocked/locked phone behavior. Existing 06:30 Asia/Seoul schedule, two 30-minute
 retries, Discord failures, missing-App-ID option/quota and installed-app fallback
 remain unchanged. Keep external selected until these checks are complete.
+
+## Experimental client identity profiles (not a sign-in fix)
+
+The upstream AltKeeper built-in V3 service uses `omnisette` and Apple's native
+`libCoreADI.so` from the Android Apple Music APK. Its default `/v3/client_info`
+values come from `vendor/omnisette/src/adi_proxy.rs`, **not** from the older
+standalone `anisette-v3-server` container. A successful V3 check and successful
+machine provisioning do not prove Apple account authentication will work.
+
+For **isolated diagnostics only**, the local V3 worker can expose a different
+client identity without changing the external server or rebuilding the image:
+
+| `ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE` | V3 identity |
+| --- | --- |
+| unset or `native` (default) | Original `omnisette` MacBookPro13,2 identity and user agent |
+| `legacy-mac` | MacBookPro13,3 / Mac OS X 10.12.6 / akd+CFNetwork pair observed on a working public V3 endpoint |
+| `windows-compat` | Experimental Windows AuthKit identity reported as accepted at *initial* login by iPASide; not verified with AltKeeper |
+
+Set the variable on **only a disposable test worker/container** and restart that
+worker. The active profile is logged on startup. Invalid values fail startup
+explicitly. The V3 response has the normal `client_info` and `user_agent`
+keys; no password, account ID or Anisette token is included in the diagnostic.
+The default remains unchanged when the variable is absent.
+
+This switches only the advertised V3 client metadata. The underlying Apple Music
+Android CoreADI library, its native provisioning request identity, and the
+provisioning/OTP algorithms are **not** changed. Consequently this is a diagnostic
+experiment, not a validated workaround for Apple's `-80045` or `-80046`:
+changing the client string might get past the initial sign-in and still fail at
+2FA or at the final token request. Do not retry login repeatedly or enable
+automatic fallback. Use a fresh, separate `/data` directory for each profile
+when testing: `state/anisette_state` is tied to the provisioning identity and
+AltKeeper's existing retirement check tracks the server URL, **not** this
+experimental profile setting. Do not change it on the production 06:30 instance.
+
+References: [official AltKeeper local engine](https://github.com/BartolomeoRusso9/altkeeper/blob/main/src/anisette_server.rs),
+[omnisette ADI constants](https://github.com/SideStore/apple-private-apis), and
+[iPASide changelog (October 2026)](https://github.com/pwnapplehat/iPASide/blob/main/CHANGELOG.md).
