@@ -1,13 +1,15 @@
 //! Login Apple ID (anisette e 2FA), chiamate ai servizi sviluppatori e firma IPA.
 //! Il rinnovo scarica profili; la firma può registrare il dispositivo e creare certificati.
 
+use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use isideload::{
-    anisette::{AnisetteProvider, remote_v3::{ALTKEEPER_LOCAL_V3_URL, DEFAULT_ANISETTE_V3_URL, RemoteV3AnisetteProvider}},
+    anisette::{AnisetteProvider, remote_v3::{ALTKEEPER_LOCAL_V3_URL, ANISETTE_STATE_KEY, DEFAULT_ANISETTE_V3_URL, RemoteV3AnisetteProvider}},
     auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
     dev::{
         app_ids::{AppId, AppIdsApi, Profile},
@@ -20,6 +22,7 @@ use isideload::{
     util::{callbacks::MaxCertsCallbackBox, fs_storage::FsStorage},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::phone::dbg;
 
@@ -28,6 +31,7 @@ const STATE_DIR: &str = "state";
 pub const LOCAL_ANISETTE_URL: &str = ALTKEEPER_LOCAL_V3_URL;
 const ANISETTE_URL_FILE: &str = "anisette-url";
 const ANISETTE_EFFECTIVE_URL_FILE: &str = "anisette-effective-url";
+const ANISETTE_IDENTITIES_DIR: &str = "anisette-identities";
 
 /// Se `true` la callback 2FA chiede il codice sul terminale, altrimenti fallisce
 /// (un servizio non presidiato non può inserire codici).
@@ -157,8 +161,7 @@ pub fn anisette_choice(dir: &Path) -> Result<AnisetteChoice, String> {
     }
 }
 
-/// Save or clear the dashboard choice. Only a real effective URL change retires
-/// the previous provisioned identity; the original is kept as .stale.
+/// Save or clear the dashboard choice, preserving each server's identity.
 pub fn save_anisette_choice(dir: &Path, new_url: Option<&str>) -> Result<AnisetteChoice, String> {
     let previous = anisette_choice(dir)?;
     if previous.locked {
@@ -168,9 +171,10 @@ pub fn save_anisette_choice(dir: &Path, new_url: Option<&str>) -> Result<Anisett
         Some(raw) => Some(anisette_url(Some(raw))?.ok_or("Supply a nonempty Anisette URL.")?),
         None => None,
     };
+    // Older builds may have an identity without an effective URL marker.
+    // Migrate it using the current choice before changing that choice.
+    prepare_anisette_storage(dir, &previous.url)?;
     let state = dir.join(STATE_DIR);
-    std::fs::create_dir_all(&state).map_err(dbg)?;
-    crate::fsperm::restrict_dir(&state).map_err(dbg)?;
     let file = state.join(ANISETTE_URL_FILE);
     match validated {
         Some(url) => {
@@ -187,14 +191,7 @@ pub fn save_anisette_choice(dir: &Path, new_url: Option<&str>) -> Result<Anisett
             Err(e) => return Err(format!("Cannot restore default Anisette server: {e}")),
         },
     }
-    let current = anisette_choice(dir)?;
-    if current.url != previous.url {
-        if retire_anisette_state(dir)? {
-            crate::log::line("[anisette] server changed: moved the previous provisioning identity to .stale");
-        }
-        crate::fsperm::write_private(&state.join(ANISETTE_EFFECTIVE_URL_FILE), current.url.as_bytes()).map_err(dbg)?;
-    }
-    Ok(current)
+    anisette_choice(dir)
 }
 
 /// Only check the V3 client_info endpoint. No account login, provisioning, or
@@ -218,34 +215,81 @@ pub async fn test_anisette_client_info(dir: &Path, candidate: Option<&str>) -> R
     Ok(())
 }
 
-/// L'identità anisette del "dispositivo" resta su disco (`state/`): dopo il primo codice 2FA
-/// Apple di solito non lo richiede più.
-fn anisette_provider(dir: &Path) -> Result<RemoteV3AnisetteProvider, String> {
+fn server_identity_dir(identities: &Path, url: &str) -> PathBuf {
+    identities.join(hex::encode(Sha256::digest(url.as_bytes())))
+}
+
+fn create_private_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(dbg)?;
+    crate::fsperm::restrict_dir(path).map_err(dbg)
+}
+
+fn prepare_anisette_storage(dir: &Path, url: &str) -> Result<PathBuf, String> {
     let state = dir.join(STATE_DIR);
-    std::fs::create_dir_all(&state).map_err(dbg)?;
-    crate::fsperm::restrict_dir(&state).map_err(dbg)?;
+    let identities = state.join(ANISETTE_IDENTITIES_DIR);
+    create_private_dir(&state)?;
+    create_private_dir(&identities)?;
+
+    let legacy = state.join(ANISETTE_STATE_KEY);
+    if legacy.try_exists().map_err(dbg)? {
+        // Dashboard and CLI processes can encounter the same legacy identity.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(identities.join("migration.lock"))
+            .map_err(dbg)?;
+        lock.lock().map_err(dbg)?;
+        if legacy.try_exists().map_err(dbg)? {
+            let legacy_url = match fs::read_to_string(state.join(ANISETTE_EFFECTIVE_URL_FILE)) {
+                Ok(marker) => anisette_url(Some(&marker)).ok().flatten(),
+                Err(error) if error.kind() == ErrorKind::NotFound => Some(url.to_owned()),
+                Err(error) => return Err(dbg(error)),
+            };
+            let mut destination = legacy.with_extension("legacy");
+            if let Some(legacy_url) = legacy_url {
+                let legacy_dir = server_identity_dir(&identities, &legacy_url);
+                create_private_dir(&legacy_dir)?;
+                destination = legacy_dir.join(ANISETTE_STATE_KEY);
+                if destination.try_exists().map_err(dbg)? {
+                    // Preserve any legacy identity written after a downgrade.
+                    destination.set_extension("legacy");
+                }
+            }
+            crate::fsperm::restrict_file(&legacy).map_err(dbg)?;
+            fs::rename(legacy, destination).map_err(dbg)?;
+        }
+    }
+
+    let selected = server_identity_dir(&identities, url);
+    create_private_dir(&selected)?;
+    Ok(selected)
+}
+
+fn anisette_provider(dir: &Path) -> Result<RemoteV3AnisetteProvider, String> {
     let choice = anisette_choice(dir)?;
+    let storage = prepare_anisette_storage(dir, &choice.url)?;
+    build_anisette_provider(dir, &choice.url, storage)
+}
+
+fn build_anisette_provider(
+    dir: &Path,
+    url: &str,
+    storage: PathBuf,
+) -> Result<RemoteV3AnisetteProvider, String> {
     // CLI commands may use the loopback server of an already running `serve`
     // process. They must not start a short-lived worker that dies as soon as
     // their first authentication returns a "starting" error.
-    if choice.url == LOCAL_ANISETTE_URL
+    if url == LOCAL_ANISETTE_URL
         && !matches!(crate::anisette_server::local_status(), crate::anisette_server::LocalStatus::Stopped)
     {
         crate::anisette_server::require_ready(dir)?;
     }
-    // On the first run of an upgraded installation no marker exists: preserve
-    // the previously saved identity rather than invalidating it needlessly.
-    let marker = state.join(ANISETTE_EFFECTIVE_URL_FILE);
-    if let Ok(previous) = std::fs::read_to_string(&marker) {
-        if previous.trim() != choice.url && retire_anisette_state(dir)? {
-            crate::log::line("[anisette] effective server changed: retired the old identity");
-        }
-    }
-    crate::fsperm::write_private(&marker, choice.url.as_bytes()).map_err(dbg)?;
     let provider = RemoteV3AnisetteProvider::default().map_err(|e| e.to_string())?
-        .set_url(&choice.url);
+        .set_url(url);
     Ok(provider
-        .set_storage(Box::new(FsStorage::new(state)))
+        .set_storage(Box::new(FsStorage::new(storage)))
         .set_serial_number("2".to_string()))
 }
 
@@ -275,7 +319,7 @@ pub fn iso8601_utc(epoch_secs: u64) -> String {
 }
 
 /// Il server anisette risponde -45061 ("reprovision required") quando l'identità salvata in
-/// `state/anisette_state` non vale più per lui: server cambiato, backend rifatto, `adi.pb`
+/// `anisette_state` non vale più per lui: backend rifatto, `adi.pb`
 /// perso. Riprovare con la stessa identità non serve a niente, bisogna provisionarne una nuova.
 ///
 /// Con isideload 0.4.x `get_anisette_data` riprova da sé fino a 3 volte (`get_data_or_provision`)
@@ -290,13 +334,13 @@ fn needs_reprovision(err: &str) -> bool {
 
 /// Mette da parte l'identità anisette scaduta (`anisette_state` -> `anisette_state.stale`):
 /// al prossimo uso `isideload` ne crea e ne provisiona una nuova. `false` se non c'era niente.
-fn retire_anisette_state(dir: &Path) -> Result<bool, String> {
-    let file = dir.join(STATE_DIR).join("anisette_state");
-    if !file.exists() {
-        return Ok(false);
+fn retire_anisette_state(storage: &Path) -> Result<bool, String> {
+    let file = storage.join(ANISETTE_STATE_KEY);
+    match fs::rename(&file, file.with_extension("stale")) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(dbg(error)),
     }
-    std::fs::rename(&file, file.with_extension("stale")).map_err(dbg)?;
-    Ok(true)
 }
 
 /// I dati anisette che AltStore chiede al suo AltServer (`AnisetteDataRequest`): stesso
@@ -305,16 +349,19 @@ fn retire_anisette_state(dir: &Path) -> Result<bool, String> {
 ///
 /// Se il server dice "reprovision required" (-45061) l'identità salvata viene messa da parte
 /// e si riprova una volta sola con una nuova, invece di restare bloccati finché qualcuno
-/// non cancella `state/anisette_state` a mano.
+/// non cancella l'identità del server a mano.
 pub async fn anisette_for_altstore(dir: &Path) -> Result<serde_json::Value, String> {
-    match anisette_for_altstore_once(dir).await {
+    let choice = anisette_choice(dir)?;
+    let storage = prepare_anisette_storage(dir, &choice.url)?;
+    let provider = || build_anisette_provider(dir, &choice.url, storage.clone());
+    match anisette_for_altstore_once(provider()?).await {
         Err(e) if needs_reprovision(&e) => {
-            if retire_anisette_state(dir)? {
+            if retire_anisette_state(&storage)? {
                 crate::log::line(&crate::tr!(
-                    format!("[anisette] il server non riconosce l'identità salvata ({e}); la metto da parte in state/anisette_state.stale e ne creo una nuova"),
-                    format!("[anisette] server did not recognize the saved identity ({e}); moved it to state/anisette_state.stale and provisioning a new one")
+                    format!("[anisette] il server non riconosce l'identità salvata ({e}); la metto da parte e ne creo una nuova"),
+                    format!("[anisette] server did not recognize its saved identity ({e}); moved it aside and provisioning a new one")
                 ));
-                anisette_for_altstore_once(dir).await
+                anisette_for_altstore_once(provider()?).await
             } else {
                 Err(e)
             }
@@ -323,10 +370,9 @@ pub async fn anisette_for_altstore(dir: &Path) -> Result<serde_json::Value, Stri
     }
 }
 
-async fn anisette_for_altstore_once(dir: &Path) -> Result<serde_json::Value, String> {
+async fn anisette_for_altstore_once(provider: RemoteV3AnisetteProvider) -> Result<serde_json::Value, String> {
     use isideload::anisette::AnisetteDataGenerator;
 
-    let provider = anisette_provider(dir)?;
     let mut generator =
         AnisetteDataGenerator::new(Arc::new(tokio::sync::RwLock::new(provider)));
     let gs = Arc::new(
@@ -762,24 +808,70 @@ pub async fn sign_ipa(
 #[cfg(test)]
 mod local_choice_tests {
     use super::*;
+
     #[test]
-    fn upgrade_preserves_external_identity_and_explicit_switches_retire_it() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+    fn upgrade_preserves_both_identities_when_switching_servers() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join(STATE_DIR);
-        std::fs::create_dir(&state).unwrap();
-        let identity = state.join("anisette_state");
-        std::fs::write(&identity, b"existing external identity").unwrap();
-        assert_eq!(anisette_choice(dir.path()).unwrap().url, "https://ani.jkcoxson.com");
-        let _provider = anisette_provider(dir.path()).unwrap();
-        assert_eq!(std::fs::read(&identity).unwrap(), b"existing external identity");
+        fs::create_dir(&state).unwrap();
+        let legacy = state.join(ANISETTE_STATE_KEY);
+        fs::write(&legacy, b"existing external identity").unwrap();
+        let stale = legacy.with_extension("stale");
+        fs::write(&stale, b"legacy backup").unwrap();
+
         save_anisette_choice(dir.path(), Some(LOCAL_ANISETTE_URL)).unwrap();
-        assert!(!identity.exists());
-        assert_eq!(std::fs::read(state.join("anisette_state.stale")).unwrap(), b"existing external identity");
-        std::fs::write(&identity, b"local identity").unwrap();
+        let local = prepare_anisette_storage(dir.path(), LOCAL_ANISETTE_URL)
+            .unwrap().join(ANISETTE_STATE_KEY);
+        assert!(!local.exists());
+        fs::write(&local, b"local identity").unwrap();
+
         save_anisette_choice(dir.path(), None).unwrap();
-        assert!(!identity.exists());
-        assert_eq!(std::fs::read(state.join("anisette_state.stale")).unwrap(), b"local identity");
-        assert_eq!(anisette_choice(dir.path()).unwrap().url, "https://ani.jkcoxson.com");
+        let external = prepare_anisette_storage(dir.path(), DEFAULT_ANISETTE_V3_URL)
+            .unwrap().join(ANISETTE_STATE_KEY);
+        assert_eq!(fs::read(&external).unwrap(), b"existing external identity");
+        assert!(!legacy.exists());
+        assert_eq!(fs::read(&stale).unwrap(), b"legacy backup");
+
+        let choice = save_anisette_choice(dir.path(), Some("http://127.0.0.1:8788/")).unwrap();
+        assert_eq!(choice.url, LOCAL_ANISETTE_URL);
+        let selected = prepare_anisette_storage(dir.path(), &choice.url)
+            .unwrap().join(ANISETTE_STATE_KEY);
+        assert_eq!(selected, local);
+        assert_eq!(fs::read(&selected).unwrap(), b"local identity");
+        assert_eq!(fs::read(&external).unwrap(), b"existing external identity");
+    }
+
+    #[test]
+    fn legacy_marker_assigns_the_identity_to_its_server_before_reprovisioning() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join(STATE_DIR);
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join(ANISETTE_STATE_KEY), b"existing local identity").unwrap();
+        fs::write(state.join(ANISETTE_EFFECTIVE_URL_FILE), LOCAL_ANISETTE_URL).unwrap();
+
+        let external = prepare_anisette_storage(dir.path(), DEFAULT_ANISETTE_V3_URL).unwrap();
+        assert!(!external.join(ANISETTE_STATE_KEY).exists());
+        fs::write(external.join(ANISETTE_STATE_KEY), b"external identity").unwrap();
+        let local = prepare_anisette_storage(dir.path(), LOCAL_ANISETTE_URL).unwrap();
+        assert_eq!(fs::read(local.join(ANISETTE_STATE_KEY)).unwrap(), b"existing local identity");
+
+        assert!(retire_anisette_state(&local).unwrap());
+        assert!(!retire_anisette_state(&local).unwrap());
+        assert!(!local.join(ANISETTE_STATE_KEY).exists());
+        assert_eq!(fs::read(local.join("anisette_state.stale")).unwrap(), b"existing local identity");
+        assert_eq!(fs::read(external.join(ANISETTE_STATE_KEY)).unwrap(), b"external identity");
+    }
+
+    #[test]
+    fn legacy_identity_with_a_damaged_marker_is_preserved_without_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join(STATE_DIR);
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join(ANISETTE_STATE_KEY), b"unknown identity").unwrap();
+        fs::write(state.join(ANISETTE_EFFECTIVE_URL_FILE), "").unwrap();
+
+        let external = prepare_anisette_storage(dir.path(), DEFAULT_ANISETTE_V3_URL).unwrap();
+        assert!(!external.join(ANISETTE_STATE_KEY).exists());
+        assert_eq!(fs::read(state.join("anisette_state.legacy")).unwrap(), b"unknown identity");
     }
 }
