@@ -156,7 +156,7 @@ It uses the existing CoreADI engine and varies the Apple request by stage:
 
 | Stage | Apple-facing request |
 | --- | --- |
-| GrandSlam URL lookup | Existing Mac claim to obtain the desktop service URLs |
+| GrandSlam URL lookup | Same Android Apple Music client claim as SRP |
 | V3 machine provisioning and GrandSlam SRP sign-in | Android Apple Music client claim |
 | Xcode app token and subsequent developer requests | Mac AuthKit client claim |
 | Reprovisioning during a developer session | Original Android claim |
@@ -167,6 +167,9 @@ Only the built-in URL and the exact opt-in profile activate this flow. The
 default public endpoint, custom URLs and the three existing profiles use their
 existing request behavior. The Android profile does not retry 429/503 sign-ins
 automatically. Normal Apple-driven 2FA and resync handling remains in place.
+Apparition [reports HTTP 503 on the first Android SRP request][apparition-lookup]
+when the URL lookup used a Mac claim. The opt-in flow keeps the same identity
+across lookup and SRP, while the external flow keeps its existing Mac lookup.
 
 The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as
 Windows ADI even though the endpoint has advertised a Mac client string. That
@@ -201,3 +204,5 @@ container and its 06:30 Asia/Seoul job on the existing external server.
 [apparition-macos]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/src/anisette/native.rs
 [server-list]: https://github.com/SideStore/anisette-servers/blob/main/servers.json
 [windows-adi]: https://github.com/nab138/isideload/issues/27
+
+[apparition-lookup]: https://blog.illixion.com/2026/10/sideloading-error-80046/#fixing-a-tool-that-signs-in

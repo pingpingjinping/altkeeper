@@ -21,7 +21,7 @@ use crate::sideload::cert_identity::APPLE_ROOT;
 use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataExtract};
 
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
-const URL_BAG_CLIENT_INFO: &str =
+const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 
 /// Con ALTKEEPER_DEBUG (o la vecchia ALTREFRESH_DEBUG) impostata, stampa su stderr come risponde Apple a ogni richiesta:
@@ -64,7 +64,7 @@ impl GrandSlam {
         let client =
             Self::build_reqwest_client(debug, proxy_url).context("Failed to build HTTP client")?;
         let base_headers = Self::base_headers(&client_info, false, local_android)?;
-        let url_bag = Self::fetch_url_bag(&client, base_headers).await?;
+        let url_bag = Self::fetch_url_bag_for_auth(&client, base_headers, local_android).await?;
         Ok(Self {
             client,
             local_android_login: local_android.then(|| client_info.clone()),
@@ -82,7 +82,7 @@ impl GrandSlam {
     pub(crate) fn developer_client(self: &Arc<Self>) -> Arc<Self> {
         if self.is_local_android() {
             let mut client = self.as_ref().clone();
-            client.client_info.client_info = URL_BAG_CLIENT_INFO.to_owned();
+            client.client_info.client_info = MAC_CLIENT_INFO.to_owned();
             Arc::new(client)
         } else {
             self.clone()
@@ -100,22 +100,36 @@ impl GrandSlam {
         self.clone()
     }
 
-    /// Fetch the URL bag from GrandSlam and cache it
+    /// Fetch the URL bag from GrandSlam using the legacy Mac lookup identity.
     pub async fn fetch_url_bag(
         client: &reqwest_middleware::ClientWithMiddleware,
-        mut base_headers: HeaderMap,
+        base_headers: HeaderMap,
+    ) -> Result<Dictionary, Report> {
+        Self::fetch_url_bag_for_auth(client, base_headers, false).await
+    }
+
+    fn url_bag_request(
+        client: &reqwest_middleware::ClientWithMiddleware,
+        mut headers: HeaderMap,
+        local_android: bool,
+    ) -> reqwest_middleware::RequestBuilder {
+        // Apple can reject the first Android SRP request after a Mac URL lookup
+        // with HTTP 503. Keep the sign-in identity for the local Android flow.
+        if !local_android {
+            headers.insert("X-Mme-Client-Info", HeaderValue::from_static(MAC_CLIENT_INFO));
+        }
+        client.get(URL_BAG).headers(headers)
+    }
+
+    async fn fetch_url_bag_for_auth(
+        client: &reqwest_middleware::ClientWithMiddleware,
+        base_headers: HeaderMap,
+        local_android: bool,
     ) -> Result<Dictionary, Report> {
         debug!("Fetching URL bag from GrandSlam");
-        // Sending the android client info gets us the wrong url bag, so we lie for this request
-        base_headers.insert(
-            "X-Mme-Client-Info",
-            HeaderValue::from_str(URL_BAG_CLIENT_INFO)?,
-        );
         let n = GS_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
         let started = Instant::now();
-        let resp = client
-            .get(URL_BAG)
-            .headers(base_headers)
+        let resp = Self::url_bag_request(client, base_headers, local_android)
             .send()
             .await
             .context("Failed to fetch URL Bag")?;
@@ -468,7 +482,7 @@ mod tests {
             (
                 developer.as_ref(),
                 "https://gsa.apple.com/grandslam/GsService2",
-                URL_BAG_CLIENT_INFO,
+                MAC_CLIENT_INFO,
             ),
             (
                 provision.as_ref(),
@@ -493,6 +507,29 @@ mod tests {
     }
 
     #[test]
+    fn local_android_uses_the_sign_in_identity_for_url_lookup() {
+        let login = client(LOCAL_ANDROID_CLIENT_INFO, true);
+        let lookup = GrandSlam::url_bag_request(
+            &login.client,
+            login.request_headers(false).unwrap(),
+            login.is_local_android(),
+        )
+        .build()
+        .unwrap();
+        let srp = login
+            .post("https://gsa.apple.com/grandslam/GsService2")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(lookup.url().as_str(), URL_BAG);
+        assert_eq!(lookup.method(), reqwest::Method::GET);
+        for header in ["x-mme-client-info", "user-agent", "content-type"] {
+            assert_eq!(lookup.headers()[header], srp.headers()[header]);
+        }
+    }
+
+    #[test]
     fn external_provider_keeps_its_claim_and_legacy_transport_for_all_stages() {
         let claim = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29>";
         let login = client(claim, false);
@@ -506,5 +543,15 @@ mod tests {
         assert_eq!(request.headers()["x-mme-client-info"], claim);
         assert_eq!(request.headers()["content-type"], "text/x-xml-plist");
         assert_eq!(request.headers()["accept"], "text/x-xml-plist");
+
+        let lookup = GrandSlam::url_bag_request(
+            &login.client,
+            login.request_headers(false).unwrap(),
+            login.is_local_android(),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(lookup.headers()["x-mme-client-info"], MAC_CLIENT_INFO);
+        assert_eq!(lookup.headers()["content-type"], "text/x-xml-plist");
     }
 }
