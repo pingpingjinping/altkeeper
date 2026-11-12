@@ -181,7 +181,11 @@ For the HTML HTTP 403 reported at GrandSlam sign-in on WalnutPi, the local
 Android flow uses `/grandslam/GsService2/` and
 `Content-Type: text/xml; charset=UTF-8` for POST requests to that service on
 `gsd.apple.com`, following [Apparition PR #17][apparition-gsd-403]. The lookup
-and MidService provisioning still send `text/xml`. Live Apple sign-in on
+and MidService provisioning still send `text/xml`. On WalnutPi, this reached
+the trusted-device 2FA request, which returned HTTP 403. If that request gets
+an empty or HTML 403 response, the local Android flow keeps the 2FA prompt
+open because Apple may already have pushed a code during the password
+exchange. Apple still has to validate the code. End-to-end sign-in on
 WalnutPi is pending.
 
 The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as

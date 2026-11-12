@@ -386,18 +386,44 @@ impl AppleAccount {
             .grandslam_client
             .get_url("trustedDeviceSecondaryAuth")?;
 
-        self.grandslam_client
+        let response = self.grandslam_client
             .get(&request_code_url)?
             .headers(self.build_2fa_headers(&anisette_data).await?)
             .send()
             .await
-            .context("Failed to request trusted device 2fa")?
-            .error_for_status()
-            .context("Trusted device 2FA request failed")?;
+            .context("Failed to request trusted device 2fa")?;
+
+        if let Err(error) = response.error_for_status_ref() {
+            if self.grandslam_client.is_local_android()
+                && response.status() == reqwest::StatusCode::FORBIDDEN
+            {
+                let body = response
+                    .text()
+                    .await
+                    .context("Failed to read trusted device 2FA response")?;
+                if Self::trusted_device_push_unconfirmed(&body) {
+                    // Apple may have pushed a code during SRP completion.
+                    // Keep the session so the user can submit that code.
+                    self.last_error = Some(
+                        "Apple did not confirm sending a code (HTTP 403). If a code arrived on a trusted device, enter it here."
+                            .into(),
+                    );
+                    return Ok(());
+                }
+            }
+            return Err(error).context("Trusted device 2FA request failed")?;
+        }
 
         info!("Trusted device 2FA request sent");
 
         Ok(())
+    }
+
+    fn trusted_device_push_unconfirmed(body: &str) -> bool {
+        let body = body.trim().to_ascii_lowercase();
+        body.is_empty()
+            || (!body.contains("serviceerrors")
+                && (body.starts_with("<!doctype html") || body.starts_with("<html")))
     }
 
     async fn verify_trusted_device_2fa(&mut self, code: String) -> Result<LoginState, Report> {
@@ -1182,6 +1208,16 @@ mod tests {
 
     const SERVICE_ERROR_BODY: &str =
         r#"{"serviceErrors":[{"code":"-1","title":"t","message":"m"}]}"#;
+
+    #[test]
+    fn trusted_device_push_allows_code_entry_after_an_empty_or_html_rejection() {
+        for body in ["", " \n", "<!DOCTYPE html><html>Forbidden</html>", "<html>Forbidden</html>"] {
+            assert!(AppleAccount::trusted_device_push_unconfirmed(body));
+        }
+        for body in [SERVICE_ERROR_BODY, "<plist><dict/></plist>", "Forbidden"] {
+            assert!(!AppleAccount::trusted_device_push_unconfirmed(body));
+        }
+    }
 
     /// HTTP 403 with an empty body is the signal that the SMS channel is blocked.
     #[test]
