@@ -185,8 +185,13 @@ and MidService provisioning still send `text/xml`. On WalnutPi, this reached
 the trusted-device 2FA request, which returned HTTP 403. If that request gets
 an empty or HTML 403 response, the local Android flow keeps the 2FA prompt
 open because Apple may already have pushed a code during the password
-exchange. Apple still has to validate the code. End-to-end sign-in on
-WalnutPi is pending.
+exchange. Apple still has to validate the code. A later WalnutPi test
+received a code and reached Developer Services after Apple issued the
+Xcode token. The legacy `listTeams.action` endpoint returned HTTP 415.
+Legacy Developer Services plist requests now send `text/x-xml-plist` as
+in [Apparition's developer client][apparition-developer-plist]. GrandSlam
+requests and the JSON Developer Services API keep their own media types.
+Team listing and renewal on WalnutPi are pending.
 
 The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as
 Windows ADI even though the endpoint has advertised a Mac client string. That
@@ -225,3 +230,4 @@ container and its 06:30 Asia/Seoul job on the existing external server.
 [apparition-lookup]: https://blog.illixion.com/2026/10/sideloading-error-80046/#fixing-a-tool-that-signs-in
 [apple-root-g3]: https://www.apple.com/certificateauthority/
 [apparition-gsd-403]: https://github.com/illixion/Apparition/pull/17
+[apparition-developer-plist]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/vendor/isideload/src/dev/developer_session.rs

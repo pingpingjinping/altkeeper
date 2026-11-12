@@ -105,7 +105,7 @@ impl DeveloperSession {
 
         let text = self
             .client
-            .post(url)?
+            .post_developer_plist(url)?
             .body(plist_to_xml_string(&body))
             .headers(
                 self.get_headers()

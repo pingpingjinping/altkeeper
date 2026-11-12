@@ -27,6 +27,7 @@ const APPLE_ROOT_G3: &[u8] = include_bytes!("../assets/AppleRootCA-G3.cer");
 
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
 const GSD_SIGN_IN_URL: &str = "https://gsd.apple.com/grandslam/GsService2/";
+const PLIST_MEDIA_TYPE: &str = "text/x-xml-plist";
 const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 
@@ -217,6 +218,19 @@ impl GrandSlam {
         Ok(self.client.post(url).headers(headers))
     }
 
+    pub(crate) fn post_developer_plist(
+        &self,
+        url: &str,
+    ) -> Result<reqwest_middleware::RequestBuilder, Report> {
+        let mut headers = self.request_headers(false)?;
+        // Developer Services expects the plist media type after GrandSlam sign-in.
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static(PLIST_MEDIA_TYPE),
+        );
+        Ok(self.client.post(url).headers(headers))
+    }
+
     pub fn post_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
         let builder = self
             .client
@@ -363,10 +377,10 @@ impl GrandSlam {
             let content_type = if local_android {
                 "text/xml"
             } else {
-                "text/x-xml-plist"
+                PLIST_MEDIA_TYPE
             };
             headers.insert("Content-Type", HeaderValue::from_static(content_type));
-            headers.insert("Accept", HeaderValue::from_static("text/x-xml-plist"));
+            headers.insert("Accept", HeaderValue::from_static(PLIST_MEDIA_TYPE));
         } else {
             headers.insert("Content-Type", HeaderValue::from_static("application/json"));
             headers.insert("Accept", HeaderValue::from_static("application/json"));
@@ -548,6 +562,25 @@ mod tests {
             .unwrap();
         assert_eq!(sms.headers()["x-mme-client-info"], LOCAL_ANDROID_CLIENT_INFO);
         assert_eq!(sms.headers()["content-type"], "application/json");
+    }
+
+    #[test]
+    fn developer_plist_posts_use_the_legacy_media_type_with_either_provider() {
+        use crate::dev::device_type::{DeveloperDeviceType::Any, dev_url};
+
+        let url = dev_url("listTeams", Any);
+        let external_claim = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29>";
+        let local = client(LOCAL_ANDROID_CLIENT_INFO, true).developer_client();
+        let external = client(external_claim, false).developer_client();
+        for (developer, expected_claim) in [(local, MAC_CLIENT_INFO), (external, external_claim)] {
+            let request = developer.post_developer_plist(&url).unwrap().build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().as_str(), url);
+            assert_eq!(request.headers()["content-type"], PLIST_MEDIA_TYPE);
+            assert_eq!(request.headers().get_all("content-type").iter().count(), 1);
+            assert_eq!(request.headers()["accept"], PLIST_MEDIA_TYPE);
+            assert_eq!(request.headers()["x-mme-client-info"], expected_claim);
+        }
     }
 
     #[test]
