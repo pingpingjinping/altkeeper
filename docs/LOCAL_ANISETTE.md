@@ -106,7 +106,7 @@ unlocked/locked phone behavior. Existing 06:30 Asia/Seoul schedule, two 30-minut
 retries, Discord failures, missing-App-ID option/quota and installed-app fallback
 remain unchanged. Keep external selected until these checks are complete.
 
-## Experimental client identity profiles (not a sign-in fix)
+## Experimental client identity profiles
 
 The upstream AltKeeper built-in V3 service uses `omnisette` and Apple's native
 `libCoreADI.so` from the Android Apple Music APK. Its default `/v3/client_info`
@@ -129,7 +129,7 @@ explicitly. The V3 response has the normal `client_info` and `user_agent`
 keys; no password, account ID or Anisette token is included in the diagnostic.
 The default remains unchanged when the variable is absent.
 
-This switches only the advertised V3 client metadata. The underlying Apple Music
+For these three profiles this switches only the advertised V3 client metadata. The underlying Apple Music
 Android CoreADI library, its native provisioning request identity, and the
 provisioning/OTP algorithms are **not** changed. Consequently this is a diagnostic
 experiment, not a validated workaround for Apple's `-80045` or `-80046`:
@@ -143,3 +143,61 @@ experimental profile setting. Do not change it on the production 06:30 instance.
 References: [official AltKeeper local engine](https://github.com/BartolomeoRusso9/altkeeper/blob/main/src/anisette_server.rs),
 [omnisette ADI constants](https://github.com/SideStore/apple-private-apis), and
 [iPASide changelog (October 2026)](https://github.com/pwnapplehat/iPASide/blob/main/CHANGELOG.md).
+
+## Experimental Android CoreADI sign-in on ARM64 Linux
+
+Select `ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE=coreadi-android` on an isolated
+test container with a fresh `/data` directory. Choose the built-in loopback
+server in the dashboard. The profile is picked up on worker startup. Its
+connection check verifies only that the V3 endpoint responds.
+
+This profile follows [Apparition's Android CoreADI approach][apparition-claim].
+It uses the existing CoreADI engine and varies the Apple request by stage:
+
+| Stage | Apple-facing request |
+| --- | --- |
+| GrandSlam URL lookup | Existing Mac claim to obtain the desktop service URLs |
+| V3 machine provisioning and GrandSlam SRP sign-in | Android Apple Music client claim |
+| Xcode app token and subsequent developer requests | Mac AuthKit client claim |
+| Reprovisioning during a developer session | Original Android claim |
+| XML request bodies | `Content-Type: text/xml`, with the existing plist response type |
+| JSON 2FA requests | Existing JSON media type |
+
+Only the built-in URL and the exact opt-in profile activate this flow. The
+default public endpoint, custom URLs and the three existing profiles use their
+existing request behavior. The Android profile does not retry 429/503 sign-ins
+automatically. Normal Apple-driven 2FA and resync handling remains in place.
+
+The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as
+Windows ADI even though the endpoint has advertised a Mac client string. That
+string describes the HTTP client identity, while the ADI engine computes the
+machine ID and one-time password from provisioned state. The `windows-compat`
+profile in this repository still executes Android CoreADI. A native Windows ADI
+route uses Apple's Windows components (e.g. the [iCloud AOSKit route][windows-adi]);
+the [macOS route][apparition-macos] uses AOSKit/AuthKit on a Mac. Either could
+serve the Pi from a separate compatible host. This branch does not depend on
+running Windows DLLs or macOS frameworks under emulation on the Pi.
+
+Apparition reports successful Android sign-in after changing the claimed
+platform and using [the XML media type][apparition-transport]. It also reports
+that some fresh identities need additional trusted-device verification before
+Xcode token issuance. This branch uses AltKeeper's existing 2FA flow. If Apple
+returns `-22411` without presenting the 2FA challenge, that case still needs
+verification and may require a targeted follow-up. An Apple `503` or `-80045`
+on initial SRP happens before that challenge. The errors alone do not identify
+which Apple-side check failed.
+
+GitHub Actions builds the existing image on native AMD64 and ARM64 runners and
+starts the loader with this profile to check `/v3/client_info`. The Rust tests
+check request headers and scoping without contacting Apple authentication.
+Neither check verifies a real Apple login. For the later manual test, use only a
+separate test volume and dashboard port, with automatic renewal disabled there.
+Record machine provisioning, SRP, 2FA if requested, Xcode token issuance, and
+developer team listing from a single controlled attempt. Leave the production
+container and its 06:30 Asia/Seoul job on the existing external server.
+
+[apparition-claim]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/src/claimed_platform.rs
+[apparition-transport]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/vendor/isideload/src/auth/grandslam.rs
+[apparition-macos]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/src/anisette/native.rs
+[server-list]: https://github.com/SideStore/anisette-servers/blob/main/servers.json
+[windows-adi]: https://github.com/nab138/isideload/issues/27

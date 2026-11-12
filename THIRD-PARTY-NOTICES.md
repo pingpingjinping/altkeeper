@@ -39,3 +39,16 @@ applicable Apple terms and permission to use these libraries. Select external mo
 to avoid downloading or executing them. No Apple ID is needed for downloading.
 
 See docs/LOCAL_ANISETTE.md for provenance, storage and security limitations.
+
+Apple publishes a [software license for Apple Music on Android][apple-music-sla]
+that limits the install/use grant to compatible Android devices and restricts
+redistribution. Direct download from Apple's CDN provides no additional grant.
+This experiment includes no Apple libraries, makes no new distribution of the
+loader or Apple libraries, and leaves the release review above open.
+
+The optional Android client claim and per-stage request approach are based on
+[Apparition's MIT-licensed implementation][apparition-claim]. The existing
+Android engine and native dependencies are unchanged.
+
+[apple-music-sla]: https://www.apple.com/legal/sla/docs/AppleMusic.pdf
+[apparition-claim]: https://github.com/illixion/Apparition/blob/d10e2fde5b3e7ca767aac0aa07a4c52d49b819fd/core/src/claimed_platform.rs

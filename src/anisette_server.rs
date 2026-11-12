@@ -24,6 +24,7 @@ use omnisette::{
     anisette_headers_provider::AnisetteHeadersProvider,
     store_services_core::StoreServicesCoreADIProxy,
 };
+use isideload::anisette::remote_v3::LOCAL_ANDROID_CLIENT_INFO;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -47,6 +48,7 @@ enum LocalClientProfile {
     Native,
     LegacyMac,
     WindowsCompat,
+    CoreAdiAndroid,
 }
 
 impl LocalClientProfile {
@@ -55,8 +57,9 @@ impl LocalClientProfile {
             "native" => Ok(Self::Native),
             "legacy-mac" => Ok(Self::LegacyMac),
             "windows-compat" => Ok(Self::WindowsCompat),
+            "coreadi-android" => Ok(Self::CoreAdiAndroid),
             other => Err(format!(
-                "Invalid ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE '{other}'. Expected native, legacy-mac or windows-compat."
+                "Invalid ALTKEEPER_LOCAL_ANISETTE_CLIENT_PROFILE '{other}'. Expected native, legacy-mac, windows-compat or coreadi-android."
             )),
         }
     }
@@ -74,6 +77,7 @@ impl LocalClientProfile {
             Self::Native => "native",
             Self::LegacyMac => "legacy-mac",
             Self::WindowsCompat => "windows-compat",
+            Self::CoreAdiAndroid => "coreadi-android",
         }
     }
 
@@ -82,6 +86,7 @@ impl LocalClientProfile {
             Self::Native => (CLIENT_INFO_HEADER, AKD_USER_AGENT),
             Self::LegacyMac => (LEGACY_MAC_CLIENT_INFO, LEGACY_MAC_USER_AGENT),
             Self::WindowsCompat => (WINDOWS_COMPAT_CLIENT_INFO, AKD_USER_AGENT),
+            Self::CoreAdiAndroid => (LOCAL_ANDROID_CLIENT_INFO, AKD_USER_AGENT),
         }
     }
 }
@@ -432,7 +437,7 @@ pub async fn serve(
         ))
     });
     println!("ALTKEEPER_ANISETTE_READY");
-    crate::log::line(&format!("[anisette-local] V3 client profile: {} (native CoreADI provisioning unchanged)", auth_profile.name()));
+    crate::log::line(&format!("[anisette-local] V3 client profile: {} (Android CoreADI engine)", auth_profile.name()));
     crate::log::line(&format!(
         "[anisette-local] V3 server listening at http://{bind}. This protocol has no authentication or TLS; restrict network access."
     ));
@@ -954,7 +959,12 @@ mod tests {
 
     #[test]
     fn client_info_matches_v3_shape() {
-        for profile in [LocalClientProfile::Native, LocalClientProfile::LegacyMac, LocalClientProfile::WindowsCompat] {
+        for profile in [
+            LocalClientProfile::Native,
+            LocalClientProfile::LegacyMac,
+            LocalClientProfile::WindowsCompat,
+            LocalClientProfile::CoreAdiAndroid,
+        ] {
             let value = client_info_body(profile);
             assert!(value["client_info"].as_str().is_some_and(|s| !s.is_empty()));
             assert!(value["user_agent"].as_str().is_some_and(|s| !s.is_empty()));
@@ -966,6 +976,9 @@ mod tests {
         assert_eq!(LocalClientProfile::parse("native").unwrap(), LocalClientProfile::Native);
         assert_eq!(LocalClientProfile::parse("legacy-mac").unwrap(), LocalClientProfile::LegacyMac);
         assert_eq!(LocalClientProfile::parse("windows-compat").unwrap(), LocalClientProfile::WindowsCompat);
+        let android = LocalClientProfile::parse("coreadi-android").unwrap();
+        assert_eq!(android, LocalClientProfile::CoreAdiAndroid);
+        assert_eq!(client_info_body(android)["client_info"], LOCAL_ANDROID_CLIENT_INFO);
         assert!(LocalClientProfile::parse("").is_err());
         assert!(LocalClientProfile::parse("other").is_err());
         let native = client_info_body(LocalClientProfile::Native);

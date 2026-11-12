@@ -161,12 +161,12 @@ impl AppleAccount {
             warn!("Debug mode enabled: this is a security risk!");
         }
 
-        let client_info = anisette_generator
-            .get_client_info()
-            .await
-            .context("Failed to get anisette client info")?;
-
-        let grandslam_client = GrandSlam::new(client_info, debug, proxy_url.clone()).await?;
+        let grandslam_client = anisette_generator.open_grandslam(debug, proxy_url).await?;
+        let err_429_retries = if grandslam_client.is_local_android() {
+            None
+        } else {
+            err_429_retries
+        };
 
         Ok(AppleAccount {
             email: email.to_string(),
@@ -986,8 +986,12 @@ impl AppleAccount {
             }
         });
 
-        let resp = self
-            .grandslam_client
+        let client = if app == "com.apple.gs.xcode.auth" {
+            self.grandslam_client.developer_client()
+        } else {
+            self.grandslam_client.clone()
+        };
+        let resp = client
             .plist_request(&gs_service_url, &request, None, self.err_429_retries)
             .await
             .context("Failed to send app token request")?

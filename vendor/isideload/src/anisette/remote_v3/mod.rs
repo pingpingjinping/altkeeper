@@ -28,6 +28,11 @@ use crate::util::storage::{SideloadingStorage, new_storage};
 
 pub const DEFAULT_ANISETTE_V3_URL: &str = "https://ani.jkcoxson.com";
 pub const ANISETTE_STATE_KEY: &str = "anisette_state";
+pub const ALTKEEPER_LOCAL_V3_URL: &str = "http://127.0.0.1:8788";
+
+// The Apple Music Android claim tested by Apparition's claimed_platform.rs.
+pub const LOCAL_ANDROID_CLIENT_INFO: &str =
+    "<Pixel 8><Android; 14; UQ1A.240205.004><com.apple.AuthKit/1 (com.apple.android.music/4.9.6)>";
 
 pub struct RemoteV3AnisetteProvider {
     pub state: Option<AnisetteState>,
@@ -142,9 +147,14 @@ impl AnisetteProvider for RemoteV3AnisetteProvider {
         Ok(info)
     }
 
+    fn uses_local_android_auth(&self, info: &AnisetteClientInfo) -> bool {
+        self.url == ALTKEEPER_LOCAL_V3_URL && info.client_info == LOCAL_ANDROID_CLIENT_INFO
+    }
+
     async fn provision(&mut self, gs: &Arc<GrandSlam>, force_reset: bool) -> Result<(), Report> {
         self.get_client_info().await?;
-        self.get_state(gs, force_reset).await?;
+        let provisioning_client = gs.provisioning_client();
+        self.get_state(&provisioning_client, force_reset).await?;
         Ok(())
     }
 }
@@ -444,4 +454,28 @@ enum AnisetteHeaders {
         #[serde(rename = "X-Apple-I-MD-RINFO")]
         routing_info: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_auth_requires_both_the_built_in_url_and_android_profile() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut info = AnisetteClientInfo {
+            client_info: LOCAL_ANDROID_CLIENT_INFO.to_owned(),
+            user_agent: "akd/1.0 CFNetwork/808.1.4".to_owned(),
+        };
+        let external = RemoteV3AnisetteProvider::default().unwrap();
+        assert!(!external.uses_local_android_auth(&info));
+        let other_loopback = RemoteV3AnisetteProvider::default()
+            .unwrap()
+            .set_url("http://127.0.0.1:6969");
+        assert!(!other_loopback.uses_local_android_auth(&info));
+        let local = external.set_url(ALTKEEPER_LOCAL_V3_URL);
+        assert!(local.uses_local_android_auth(&info));
+        info.client_info = "<MacBookPro13,2> <macOS;13.1;22C65>".to_owned();
+        assert!(!local.uses_local_android_auth(&info));
+    }
 }

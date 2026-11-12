@@ -10,6 +10,7 @@ use reqwest::{
 };
 use reqwest_middleware::ClientBuilder as MwClientBuilder;
 use rootcause::prelude::*;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::debug;
@@ -33,10 +34,12 @@ fn gs_debug() -> bool {
 /// Numero d'ordine delle richieste a GrandSlam, per riconoscerle nel debug.
 static GS_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Clone)]
 pub struct GrandSlam {
     pub client: reqwest_middleware::ClientWithMiddleware,
     pub client_info: AnisetteClientInfo,
     url_bag: Dictionary,
+    local_android_login: Option<AnisetteClientInfo>,
 }
 
 impl GrandSlam {
@@ -49,15 +52,52 @@ impl GrandSlam {
         debug: bool,
         proxy_url: Option<String>,
     ) -> Result<Self, Report> {
+        Self::new_with_auth_mode(client_info, debug, proxy_url, false).await
+    }
+
+    pub(crate) async fn new_with_auth_mode(
+        client_info: AnisetteClientInfo,
+        debug: bool,
+        proxy_url: Option<String>,
+        local_android: bool,
+    ) -> Result<Self, Report> {
         let client =
             Self::build_reqwest_client(debug, proxy_url).context("Failed to build HTTP client")?;
-        let base_headers = Self::base_headers(&client_info, false)?;
+        let base_headers = Self::base_headers(&client_info, false, local_android)?;
         let url_bag = Self::fetch_url_bag(&client, base_headers).await?;
         Ok(Self {
             client,
+            local_android_login: local_android.then(|| client_info.clone()),
             client_info,
             url_bag,
         })
+    }
+
+    pub(crate) fn is_local_android(&self) -> bool {
+        self.local_android_login.is_some()
+    }
+
+    // GrandSlam expects a Mac client when issuing the Xcode token even when the
+    // password exchange used Android ADI. Reuse the HTTP client and URL bag.
+    pub(crate) fn developer_client(self: &Arc<Self>) -> Arc<Self> {
+        if self.is_local_android() {
+            let mut client = self.as_ref().clone();
+            client.client_info.client_info = URL_BAG_CLIENT_INFO.to_owned();
+            Arc::new(client)
+        } else {
+            self.clone()
+        }
+    }
+
+    pub(crate) fn provisioning_client(self: &Arc<Self>) -> Arc<Self> {
+        if let Some(login) = &self.local_android_login
+            && self.client_info.client_info != login.client_info
+        {
+            let mut client = self.as_ref().clone();
+            client.client_info = login.clone();
+            return Arc::new(client);
+        }
+        self.clone()
     }
 
     /// Fetch the URL bag from GrandSlam and cache it
@@ -116,7 +156,7 @@ impl GrandSlam {
         let builder = self
             .client
             .get(url)
-            .headers(Self::base_headers(&self.client_info, false)?);
+            .headers(self.request_headers(false)?);
 
         Ok(builder)
     }
@@ -125,7 +165,7 @@ impl GrandSlam {
         let builder = self
             .client
             .get(url)
-            .headers(Self::base_headers(&self.client_info, true)?);
+            .headers(self.request_headers(true)?);
 
         Ok(builder)
     }
@@ -134,7 +174,7 @@ impl GrandSlam {
         let builder = self
             .client
             .put(url)
-            .headers(Self::base_headers(&self.client_info, true)?);
+            .headers(self.request_headers(true)?);
 
         Ok(builder)
     }
@@ -143,7 +183,7 @@ impl GrandSlam {
         let builder = self
             .client
             .post(url)
-            .headers(Self::base_headers(&self.client_info, false)?);
+            .headers(self.request_headers(false)?);
 
         Ok(builder)
     }
@@ -152,7 +192,7 @@ impl GrandSlam {
         let builder = self
             .client
             .post(url)
-            .headers(Self::base_headers(&self.client_info, true)?);
+            .headers(self.request_headers(true)?);
 
         Ok(builder)
     }
@@ -161,7 +201,7 @@ impl GrandSlam {
         let builder = self
             .client
             .patch(url)
-            .headers(Self::base_headers(&self.client_info, false)?);
+            .headers(self.request_headers(false)?);
 
         Ok(builder)
     }
@@ -278,13 +318,25 @@ impl GrandSlam {
         Ok(response_plist)
     }
 
+    fn request_headers(&self, sms: bool) -> Result<HeaderMap, Report> {
+        Self::base_headers(&self.client_info, sms, self.is_local_android())
+    }
+
     fn base_headers(
         client_info: &AnisetteClientInfo,
         sms: bool,
-    ) -> Result<reqwest::header::HeaderMap, Report> {
-        let mut headers = reqwest::header::HeaderMap::new();
+        local_android: bool,
+    ) -> Result<HeaderMap, Report> {
+        let mut headers = HeaderMap::new();
         if !sms {
-            headers.insert("Content-Type", HeaderValue::from_static("text/x-xml-plist"));
+            // Apple edge rules have treated legacy plist MIME types differently on
+            // the provisioning and sign-in hosts. Both accept XML sent as text/xml.
+            let content_type = if local_android {
+                "text/xml"
+            } else {
+                "text/x-xml-plist"
+            };
+            headers.insert("Content-Type", HeaderValue::from_static(content_type));
             headers.insert("Accept", HeaderValue::from_static("text/x-xml-plist"));
         } else {
             headers.insert("Content-Type", HeaderValue::from_static("application/json"));
@@ -380,5 +432,79 @@ impl GrandSlamErrorChecker for Dictionary {
         }
 
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anisette::remote_v3::LOCAL_ANDROID_CLIENT_INFO;
+
+    fn client(info: &str, local_android: bool) -> Arc<GrandSlam> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client_info = AnisetteClientInfo {
+            client_info: info.to_owned(),
+            user_agent: "akd/1.0 CFNetwork/808.1.4".to_owned(),
+        };
+        Arc::new(GrandSlam {
+            client: GrandSlam::build_reqwest_client(false, None).unwrap(),
+            local_android_login: local_android.then(|| client_info.clone()),
+            client_info,
+            url_bag: Dictionary::new(),
+        })
+    }
+
+    #[test]
+    fn local_android_uses_android_for_sign_in_and_provisioning_and_mac_for_xcode() {
+        let login = client(LOCAL_ANDROID_CLIENT_INFO, true);
+        let developer = login.developer_client();
+        let provision = developer.provisioning_client();
+        let cases = [
+            (
+                login.as_ref(),
+                "https://gsa.apple.com/grandslam/GsService2",
+                LOCAL_ANDROID_CLIENT_INFO,
+            ),
+            (
+                developer.as_ref(),
+                "https://gsa.apple.com/grandslam/GsService2",
+                URL_BAG_CLIENT_INFO,
+            ),
+            (
+                provision.as_ref(),
+                "https://gsd.apple.com/grandslam/MidService/start",
+                LOCAL_ANDROID_CLIENT_INFO,
+            ),
+        ];
+        for (client, url, expected_claim) in cases {
+            let request = client.post(url).unwrap().build().unwrap();
+            assert_eq!(request.headers()["x-mme-client-info"], expected_claim);
+            assert_eq!(request.headers()["content-type"], "text/xml");
+            assert_eq!(request.headers()["accept"], "text/x-xml-plist");
+        }
+
+        let sms = login
+            .put_sms("https://gsa.apple.com/")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(sms.headers()["x-mme-client-info"], LOCAL_ANDROID_CLIENT_INFO);
+        assert_eq!(sms.headers()["content-type"], "application/json");
+    }
+
+    #[test]
+    fn external_provider_keeps_its_claim_and_legacy_transport_for_all_stages() {
+        let claim = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29>";
+        let login = client(claim, false);
+        assert!(Arc::ptr_eq(&login, &login.developer_client()));
+        assert!(Arc::ptr_eq(&login, &login.provisioning_client()));
+        let request = login
+            .post("https://gsa.apple.com/grandslam/GsService2")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["x-mme-client-info"], claim);
+        assert_eq!(request.headers()["content-type"], "text/x-xml-plist");
+        assert_eq!(request.headers()["accept"], "text/x-xml-plist");
     }
 }

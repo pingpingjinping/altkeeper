@@ -62,7 +62,7 @@ impl DeveloperSession {
         Ok(DeveloperSession::new(
             token,
             spd.get_string("adsid")?,
-            account.grandslam_client.clone(),
+            account.grandslam_client.developer_client(),
             account.anisette_generator.clone(),
         ))
     }
