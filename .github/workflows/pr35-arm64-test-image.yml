@@ -1,0 +1,73 @@
+name: PR 35 ARM64 test image
+
+on:
+  push:
+    branches: [ci/pr35-arm64-test-image]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 1aade2b80391f6b1afebe0d01fdac2679951b8ff
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: altkeeper:pr35-arm64
+          labels: org.opencontainers.image.revision=1aade2b80391f6b1afebe0d01fdac2679951b8ff
+          cache-from: type=gha,scope=altkeeper-pr-linux/arm64
+      - name: Verify and encrypt the test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' altkeeper:pr35-arm64)" = linux/arm64
+          docker run --rm -e ALTKEEPER_LANG=en altkeeper:pr35-arm64 --help | grep '^usage: altkeeper'
+          cat > "$RUNNER_TEMP/pr35-recipient.crt" <<'PEM'
+          -----BEGIN CERTIFICATE-----
+          MIIENzCCAp+gAwIBAgIUC96/yLfhuBcaK51XXXguf4Oxg2kwDQYJKoZIhvcNAQEL
+          BQAwKzEpMCcGA1UEAwwgQWx0S2VlcGVyIFBSMzUgb25lLXRpbWUgZGVsaXZlcnkw
+          HhcNMjYxMTEyMDAzNjEzWhcNMjYxMTE1MDAzNjEzWjArMSkwJwYDVQQDDCBBbHRL
+          ZWVwZXIgUFIzNSBvbmUtdGltZSBkZWxpdmVyeTCCAaIwDQYJKoZIhvcNAQEBBQAD
+          ggGPADCCAYoCggGBAMajwEJjGsZ6UyiGmNUKHR2PRlPcVVagDDuQrqhJaMUHzIoP
+          mK05+SpqxHVDZBzXIdQyUGV1M/6bd96yagoQGy2He3Q9c9bz/pKWzQDSnmwhGYrv
+          4S8TeGldACe7BayxrjcYRBAdHfiIP7wdlyipFXLSrKY2egcWzzWF1OwNJBWKUGue
+          ERxCOnWWKyCJkqAHmrvUJJWuzwfQM1epF+3F8TdZnuK/PHArf4HPhzGBjU+awcji
+          0Ig6R81gNchQmhuJpacYvaJhAzUI2O5A+CFXfWocKBBv4aPo5+67Rf28BEgaKlMd
+          YwV2eBFlvOCky/NMSDHSDhyU1OZry3Fj+hc0dqDO4FNZ5Z0H0ps0hXZVYtoMjQ2x
+          lpLFXTYTxbBdG16bXr7Gjld3R6RniqMJKXmmpHPc+7+fwUZLn0SRA8OPBXdNdI10
+          ZAbOZii+PGocBEmJzhtvDs3LE/E+zShOnynQgIg7IdWnOFy0U9Uvx81s2JDUFXKr
+          YZVrCKTt/okTswIcdQIDAQABo1MwUTAdBgNVHQ4EFgQUqaG6YySPf0H//Bln9hNe
+          OJ42F8IwHwYDVR0jBBgwFoAUqaG6YySPf0H//Bln9hNeOJ42F8IwDwYDVR0TAQH/
+          BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAYEAPcCddbJNpsgdjWj+bdsWXV1HAjpi
+          sM/cUocbd4xZkh0oNbo+xpDdJQWzoiKwIJpP+nIJ0AekRTXFuMT7wfi2/tEPph1Q
+          VISzmhJ4I2VuI6913dbhcH8zLv3eqzIjAzUqbdL81wyUt7Xc8tTFtEs7n8TZesNK
+          AuM29qXkIvq+mPHkI4k+smFzt/mA7dvs6YIUwDTDSBwC2YwgAANfA2PmEeR3jxf+
+          AkJruAaXkWhddmw7bKjlpXtNGrqHwYY3WlexYpo/IJX6WA+XE3ewhF5WLqKSlIue
+          tnqDnMdOOMQw2LavkQ3lXA9+PYirELop9plQZnm18dIIwdl7Zbd1GVl6nbdMYCTC
+          Hgj0L2DoS5SSy4XvnKztv552XbijQoTLPd95sCbtnAbNCVYIVQedMtpKYN+CS5PO
+          GSb+xj8/5LrPJ5HiiGtkrrVR2rUaS2gVxyH28COmPlwBGzZwXG1E6JaUiEoibEiq
+          XF1mWqrxaezmbTxvsMRHV+58/po0RRF7HLGP
+          -----END CERTIFICATE-----
+          PEM
+          docker save altkeeper:pr35-arm64 | gzip -n > "$RUNNER_TEMP/altkeeper-pr35-arm64.tar.gz"
+          openssl cms -encrypt -binary -aes-256-gcm -outform DER \
+            -in "$RUNNER_TEMP/altkeeper-pr35-arm64.tar.gz" \
+            -out "$RUNNER_TEMP/altkeeper-pr35-arm64.tar.gz.cms" \
+            "$RUNNER_TEMP/pr35-recipient.crt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: altkeeper-pr35-arm64-encrypted
+          path: ${{ runner.temp }}/altkeeper-pr35-arm64.tar.gz.cms
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
