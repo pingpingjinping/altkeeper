@@ -26,6 +26,7 @@ use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataE
 const APPLE_ROOT_G3: &[u8] = include_bytes!("../assets/AppleRootCA-G3.cer");
 
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
+const GSD_SIGN_IN_URL: &str = "https://gsd.apple.com/grandslam/GsService2/";
 const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 
@@ -164,10 +165,17 @@ impl GrandSlam {
     }
 
     pub fn get_url(&self, key: &str) -> Result<String, Report> {
-        let url = self
+        let mut url = self
             .url_bag
             .get_string(key)
             .context("Unable to find key in URL bag")?;
+        // Apparition PR #17 reports that the slash clears an HTML 403 on this route.
+        if self.is_local_android()
+            && key == "gsService"
+            && url == GSD_SIGN_IN_URL.trim_end_matches('/')
+        {
+            url.push('/');
+        }
         Ok(url)
     }
 
@@ -199,12 +207,14 @@ impl GrandSlam {
     }
 
     pub fn post(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
-        let builder = self
-            .client
-            .post(url)
-            .headers(self.request_headers(false)?);
-
-        Ok(builder)
+        let mut headers = self.request_headers(false)?;
+        if self.is_local_android() && url == GSD_SIGN_IN_URL {
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/xml; charset=UTF-8"),
+            );
+        }
+        Ok(self.client.post(url).headers(headers))
     }
 
     pub fn post_sms(&self, url: &str) -> Result<reqwest_middleware::RequestBuilder, Report> {
@@ -480,12 +490,17 @@ mod tests {
             client_info: info.to_owned(),
             user_agent: "akd/1.0 CFNetwork/808.1.4".to_owned(),
         };
+        let mut url_bag = Dictionary::new();
+        url_bag.insert(
+            "gsService".to_owned(),
+            GSD_SIGN_IN_URL.trim_end_matches('/').into(),
+        );
         Arc::new(GrandSlam {
             client: GrandSlam::build_reqwest_client_for_auth(false, None, local_android)
                 .unwrap(),
             local_android_login: local_android.then(|| client_info.clone()),
             client_info,
-            url_bag: Dictionary::new(),
+            url_bag,
         })
     }
 
@@ -494,27 +509,35 @@ mod tests {
         let login = client(LOCAL_ANDROID_CLIENT_INFO, true);
         let developer = login.developer_client();
         let provision = developer.provisioning_client();
+        let sign_in_url = login.get_url("gsService").unwrap();
+        let token_url = developer.get_url("gsService").unwrap();
+        assert_eq!(sign_in_url, GSD_SIGN_IN_URL);
+        assert_eq!(token_url, GSD_SIGN_IN_URL);
         let cases = [
             (
                 login.as_ref(),
-                "https://gsa.apple.com/grandslam/GsService2",
+                sign_in_url.as_str(),
                 LOCAL_ANDROID_CLIENT_INFO,
+                "text/xml; charset=UTF-8",
             ),
             (
                 developer.as_ref(),
-                "https://gsa.apple.com/grandslam/GsService2",
+                token_url.as_str(),
                 MAC_CLIENT_INFO,
+                "text/xml; charset=UTF-8",
             ),
             (
                 provision.as_ref(),
                 "https://gsd.apple.com/grandslam/MidService/start",
                 LOCAL_ANDROID_CLIENT_INFO,
+                "text/xml",
             ),
         ];
-        for (client, url, expected_claim) in cases {
+        for (client, url, expected_claim, expected_content_type) in cases {
             let request = client.post(url).unwrap().build().unwrap();
+            assert_eq!(request.url().as_str(), url);
             assert_eq!(request.headers()["x-mme-client-info"], expected_claim);
-            assert_eq!(request.headers()["content-type"], "text/xml");
+            assert_eq!(request.headers()["content-type"], expected_content_type);
             assert_eq!(request.headers()["accept"], "text/x-xml-plist");
         }
 
@@ -556,11 +579,10 @@ mod tests {
         let login = client(claim, false);
         assert!(Arc::ptr_eq(&login, &login.developer_client()));
         assert!(Arc::ptr_eq(&login, &login.provisioning_client()));
-        let request = login
-            .post("https://gsa.apple.com/grandslam/GsService2")
-            .unwrap()
-            .build()
-            .unwrap();
+        let sign_in_url = login.get_url("gsService").unwrap();
+        assert_eq!(sign_in_url, GSD_SIGN_IN_URL.trim_end_matches('/'));
+        let request = login.post(&sign_in_url).unwrap().build().unwrap();
+        assert_eq!(request.url().as_str(), sign_in_url);
         assert_eq!(request.headers()["x-mme-client-info"], claim);
         assert_eq!(request.headers()["content-type"], "text/x-xml-plist");
         assert_eq!(request.headers()["accept"], "text/x-xml-plist");

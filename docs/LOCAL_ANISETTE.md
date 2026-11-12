@@ -177,6 +177,13 @@ GrandSlam client adds this public Apple root alongside the existing root and
 still verifies the server certificate and hostname. System trust and the
 external Anisette client are unchanged.
 
+For the HTML HTTP 403 reported at GrandSlam sign-in on WalnutPi, the local
+Android flow uses `/grandslam/GsService2/` and
+`Content-Type: text/xml; charset=UTF-8` for POST requests to that service on
+`gsd.apple.com`, following [Apparition PR #17][apparition-gsd-403]. The lookup
+and MidService provisioning still send `text/xml`. Live Apple sign-in on
+WalnutPi is pending.
+
 The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as
 Windows ADI even though the endpoint has advertised a Mac client string. That
 string describes the HTTP client identity, while the ADI engine computes the
@@ -213,3 +220,4 @@ container and its 06:30 Asia/Seoul job on the existing external server.
 
 [apparition-lookup]: https://blog.illixion.com/2026/10/sideloading-error-80046/#fixing-a-tool-that-signs-in
 [apple-root-g3]: https://www.apple.com/certificateauthority/
+[apparition-gsd-403]: https://github.com/illixion/Apparition/pull/17
