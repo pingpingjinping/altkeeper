@@ -24,10 +24,9 @@ web changes. Clearing restores the existing default external server.
 
 There is **no authentication-time fallback** to an external server. If local startup
 or authentication fails, the job fails visibly. Select external mode and save to
-revert. Switching effective URLs preserves the old identity as
-`state/anisette_state.stale` and provisions a new identity rather than reusing it
-against a different server. Initial upgrade with no effective-URL marker preserves
-the existing external identity. Stale identities are not silently restored on revert.
+revert. AltKeeper keeps a provisioning identity for each server URL and reuses it
+when you return to that URL. A server's first use, a rejected identity, or Apple's
+own account checks can still lead to a 2FA prompt.
 
 ## Runtime and architecture
 
@@ -84,7 +83,11 @@ and provisioning blob and generates Anisette headers. Existing account/password 
 signing keys remain in their previous files; they are not moved or encrypted anew.
 Anisette state is sensitive even though it is not the account password.
 
-- Existing `state/anisette_state` and `.stale`: private client provisioning identity.
+- `state/anisette-identities/<sha256-of-url>/anisette_state`: private client
+  provisioning identity for a normalized URL. AltKeeper migrates a legacy
+  `state/anisette_state` using `state/anisette-effective-url` when available,
+  or the current server selection otherwise. It keeps the old root-level
+  `state/anisette_state.stale` as-is because that file has no server metadata.
 - `state/anisette-provisioning/*`: private per-session `adi.pb`, deleted on normal
   session completion. A crash can leave a private temporary directory; after stopping
   the service you may remove this temporary directory, keeping `anisette_state`.
@@ -136,9 +139,9 @@ experiment, not a validated workaround for Apple's `-80045` or `-80046`:
 changing the client string might get past the initial sign-in and still fail at
 2FA or at the final token request. Do not retry login repeatedly or enable
 automatic fallback. Use a fresh, separate `/data` directory for each profile
-when testing: `state/anisette_state` is tied to the provisioning identity and
-AltKeeper's existing retirement check tracks the server URL, **not** this
-experimental profile setting. Do not change it on the production 06:30 instance.
+when testing: AltKeeper stores identities by server URL. The experimental
+profile setting uses the same built-in URL. Keep the profile stable on a
+production instance.
 
 References: [official AltKeeper local engine](https://github.com/BartolomeoRusso9/altkeeper/blob/main/src/anisette_server.rs),
 [omnisette ADI constants](https://github.com/SideStore/apple-private-apis), and
