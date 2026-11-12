@@ -20,6 +20,11 @@ use tracing::warn;
 use crate::sideload::cert_identity::APPLE_ROOT;
 use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataExtract};
 
+// Apple's published G3 root for the Android MidService TLS chain.
+// https://www.apple.com/certificateauthority/AppleRootCA-G3.cer
+#[cfg(not(feature = "wasm"))]
+const APPLE_ROOT_G3: &[u8] = include_bytes!("../assets/AppleRootCA-G3.cer");
+
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
 const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
@@ -61,8 +66,8 @@ impl GrandSlam {
         proxy_url: Option<String>,
         local_android: bool,
     ) -> Result<Self, Report> {
-        let client =
-            Self::build_reqwest_client(debug, proxy_url).context("Failed to build HTTP client")?;
+        let client = Self::build_reqwest_client_for_auth(debug, proxy_url, local_android)
+            .context("Failed to build HTTP client")?;
         let base_headers = Self::base_headers(&client_info, false, local_android)?;
         let url_bag = Self::fetch_url_bag_for_auth(&client, base_headers, local_android).await?;
         Ok(Self {
@@ -387,9 +392,18 @@ impl GrandSlam {
     /// # Errors
     /// Returns an error if the reqwest client cannot be built
     pub fn build_reqwest_client(
+        debug: bool,
+        proxy_url: Option<String>,
+    ) -> Result<reqwest_middleware::ClientWithMiddleware, Report> {
+        Self::build_reqwest_client_for_auth(debug, proxy_url, false)
+    }
+
+    fn build_reqwest_client_for_auth(
         #[cfg(not(feature = "wasm"))] debug: bool,
         #[cfg(feature = "wasm")] _debug: bool,
         proxy_url: Option<String>,
+        #[cfg(not(feature = "wasm"))] local_android: bool,
+        #[cfg(feature = "wasm")] _local_android: bool,
     ) -> Result<reqwest_middleware::ClientWithMiddleware, Report> {
         #[cfg(not(feature = "wasm"))]
         let cert = Certificate::from_der(APPLE_ROOT)?;
@@ -409,6 +423,12 @@ impl GrandSlam {
             .default_headers(close)
             .danger_accept_invalid_certs(debug)
             .connection_verbose(debug);
+        #[cfg(not(feature = "wasm"))]
+        let client = if local_android {
+            client.add_root_certificate(Certificate::from_der(APPLE_ROOT_G3)?)
+        } else {
+            client
+        };
         // Su macOS parla con Apple con il TLS di sistema (Security.framework), come i client Apple.
         #[cfg(all(not(feature = "wasm"), target_os = "macos"))]
         let client = client.tls_backend_native();
@@ -461,7 +481,8 @@ mod tests {
             user_agent: "akd/1.0 CFNetwork/808.1.4".to_owned(),
         };
         Arc::new(GrandSlam {
-            client: GrandSlam::build_reqwest_client(false, None).unwrap(),
+            client: GrandSlam::build_reqwest_client_for_auth(false, None, local_android)
+                .unwrap(),
             local_android_login: local_android.then(|| client_info.clone()),
             client_info,
             url_bag: Dictionary::new(),

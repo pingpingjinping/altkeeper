@@ -171,6 +171,12 @@ Apparition [reports HTTP 503 on the first Android SRP request][apparition-lookup
 when the URL lookup used a Mac claim. The opt-in flow keeps the same identity
 across lookup and SRP, while the external flow keeps its existing Mac lookup.
 
+The Android lookup can direct machine provisioning to `gsd.apple.com`, whose
+TLS chain on WalnutPi used [Apple Root CA - G3][apple-root-g3]. The local Android
+GrandSlam client adds this public Apple root alongside the existing root and
+still verifies the server certificate and hostname. System trust and the
+external Anisette client are unchanged.
+
 The public [SideStore directory][server-list] classifies `ani.jkcoxson.com` as
 Windows ADI even though the endpoint has advertised a Mac client string. That
 string describes the HTTP client identity, while the ADI engine computes the
@@ -206,3 +212,4 @@ container and its 06:30 Asia/Seoul job on the existing external server.
 [windows-adi]: https://github.com/nab138/isideload/issues/27
 
 [apparition-lookup]: https://blog.illixion.com/2026/10/sideloading-error-80046/#fixing-a-tool-that-signs-in
+[apple-root-g3]: https://www.apple.com/certificateauthority/
