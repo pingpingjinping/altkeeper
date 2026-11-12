@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use isideload::{
-    anisette::{AnisetteProvider, remote_v3::{RemoteV3AnisetteProvider, DEFAULT_ANISETTE_V3_URL}},
+    anisette::{AnisetteProvider, remote_v3::{ALTKEEPER_LOCAL_V3_URL, DEFAULT_ANISETTE_V3_URL, RemoteV3AnisetteProvider}},
     auth::apple_account::{AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse},
     dev::{
         app_ids::{AppId, AppIdsApi, Profile},
@@ -25,7 +25,7 @@ use crate::phone::dbg;
 
 const ACCOUNT_FILE: &str = "account.json";
 const STATE_DIR: &str = "state";
-pub const LOCAL_ANISETTE_URL: &str = "http://127.0.0.1:8788";
+pub const LOCAL_ANISETTE_URL: &str = ALTKEEPER_LOCAL_V3_URL;
 const ANISETTE_URL_FILE: &str = "anisette-url";
 const ANISETTE_EFFECTIVE_URL_FILE: &str = "anisette-effective-url";
 
@@ -324,18 +324,18 @@ pub async fn anisette_for_altstore(dir: &Path) -> Result<serde_json::Value, Stri
 }
 
 async fn anisette_for_altstore_once(dir: &Path) -> Result<serde_json::Value, String> {
-    use isideload::{anisette::AnisetteDataGenerator, auth::grandslam::GrandSlam};
+    use isideload::anisette::AnisetteDataGenerator;
 
     let provider = anisette_provider(dir)?;
     let mut generator =
         AnisetteDataGenerator::new(Arc::new(tokio::sync::RwLock::new(provider)));
-    let info = generator.get_client_info().await.map_err(|e| e.to_string())?;
     let gs = Arc::new(
-        GrandSlam::new(info.clone(), false, None)
+        generator
+            .open_grandslam(false, None)
             .await
             .map_err(|e| e.to_string())?,
     );
-    let data = generator.get_anisette_data(gs).await.map_err(|e| e.to_string())?;
+    let data = generator.get_anisette_data(gs.clone()).await.map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -347,7 +347,7 @@ async fn anisette_for_altstore_once(dir: &Path) -> Result<serde_json::Value, Str
         "routingInfo": data.routing_info.clone(),
         "deviceUniqueIdentifier": data.device_unique_identifier(),
         "deviceSerialNumber": "2",
-        "deviceDescription": info.client_info,
+        "deviceDescription": gs.client_info.client_info,
         "date": iso8601_utc(now),
         "locale": "en_US",
         "timeZone": "GMT",

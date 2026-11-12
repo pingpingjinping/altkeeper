@@ -137,6 +137,11 @@ pub trait AnisetteProvider {
 
     async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report>;
 
+    /// Whether this provider explicitly opted into AltKeeper's local Android ADI flow.
+    fn uses_local_android_auth(&self, _info: &AnisetteClientInfo) -> bool {
+        false
+    }
+
     async fn provision(&mut self, gs: &Arc<GrandSlam>, force_recheck: bool) -> Result<(), Report>;
 }
 
@@ -202,6 +207,21 @@ impl AnisetteDataGenerator {
     pub async fn get_client_info(&self) -> Result<AnisetteClientInfo, Report> {
         let provider = self.provider.read().await;
         provider.get_client_info().await
+    }
+
+    pub async fn open_grandslam(
+        &self,
+        debug: bool,
+        proxy_url: Option<String>,
+    ) -> Result<GrandSlam, Report> {
+        let provider = self.provider.read().await;
+        let info = provider
+            .get_client_info()
+            .await
+            .context("Failed to get anisette client info")?;
+        let local_android = provider.uses_local_android_auth(&info);
+        drop(provider);
+        GrandSlam::new_with_auth_mode(info, debug, proxy_url, local_android).await
     }
 
     /// Perform a login anisette resync with the server, returning corrected data.

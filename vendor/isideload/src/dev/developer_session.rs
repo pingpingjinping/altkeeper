@@ -62,7 +62,7 @@ impl DeveloperSession {
         Ok(DeveloperSession::new(
             token,
             spd.get_string("adsid")?,
-            account.grandslam_client.clone(),
+            account.grandslam_client.developer_client(),
             account.anisette_generator.clone(),
         ))
     }
@@ -105,7 +105,7 @@ impl DeveloperSession {
 
         let text = self
             .client
-            .post(url)?
+            .post_developer_plist(url)?
             .body(plist_to_xml_string(&body))
             .headers(
                 self.get_headers()
