@@ -30,6 +30,11 @@ const GSD_SIGN_IN_URL: &str = "https://gsd.apple.com/grandslam/GsService2/";
 const PLIST_MEDIA_TYPE: &str = "text/x-xml-plist";
 const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+// Test the matching Mac profile from https://github.com/nab138/iloader/pull/1205
+// only on the Xcode token request for the built-in Android provider.
+const XCODE_TOKEN_CLIENT_INFO: &str =
+    "<MacBookAir10,1> <Mac OS X;27.3;26C5035r> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+const XCODE_TOKEN_USER_AGENT: &str = "akd/1.0 CFNetwork/3896.300.31 Darwin/27.3.0";
 
 /// Con ALTKEEPER_DEBUG (o la vecchia ALTREFRESH_DEBUG) impostata, stampa su stderr come risponde Apple a ogni richiesta:
 /// stato, versione HTTP, intestazioni e, se è un errore, il corpo. Mai il corpo di una richiesta
@@ -84,8 +89,20 @@ impl GrandSlam {
         self.local_android_login.is_some()
     }
 
-    // GrandSlam expects a Mac client when issuing the Xcode token even when the
-    // password exchange used Android ADI. Reuse the HTTP client and URL bag.
+    pub(crate) fn xcode_token_client(self: &Arc<Self>) -> Arc<Self> {
+        if self.is_local_android() {
+            let mut client = self.as_ref().clone();
+            client.client_info = AnisetteClientInfo {
+                client_info: XCODE_TOKEN_CLIENT_INFO.to_owned(),
+                user_agent: XCODE_TOKEN_USER_AGENT.to_owned(),
+            };
+            Arc::new(client)
+        } else {
+            self.clone()
+        }
+    }
+
+    // Keep the existing Mac client for requests to Developer Services.
     pub(crate) fn developer_client(self: &Arc<Self>) -> Arc<Self> {
         if self.is_local_android() {
             let mut client = self.as_ref().clone();
@@ -521,10 +538,10 @@ mod tests {
     #[test]
     fn local_android_uses_android_for_sign_in_and_provisioning_and_mac_for_xcode() {
         let login = client(LOCAL_ANDROID_CLIENT_INFO, true);
-        let developer = login.developer_client();
-        let provision = developer.provisioning_client();
+        let token_client = login.xcode_token_client();
+        let provision = token_client.provisioning_client();
         let sign_in_url = login.get_url("gsService").unwrap();
-        let token_url = developer.get_url("gsService").unwrap();
+        let token_url = token_client.get_url("gsService").unwrap();
         assert_eq!(sign_in_url, GSD_SIGN_IN_URL);
         assert_eq!(token_url, GSD_SIGN_IN_URL);
         let cases = [
@@ -532,25 +549,29 @@ mod tests {
                 login.as_ref(),
                 sign_in_url.as_str(),
                 LOCAL_ANDROID_CLIENT_INFO,
+                login.client_info.user_agent.as_str(),
                 "text/xml; charset=UTF-8",
             ),
             (
-                developer.as_ref(),
+                token_client.as_ref(),
                 token_url.as_str(),
-                MAC_CLIENT_INFO,
+                XCODE_TOKEN_CLIENT_INFO,
+                XCODE_TOKEN_USER_AGENT,
                 "text/xml; charset=UTF-8",
             ),
             (
                 provision.as_ref(),
                 "https://gsd.apple.com/grandslam/MidService/start",
                 LOCAL_ANDROID_CLIENT_INFO,
+                login.client_info.user_agent.as_str(),
                 "text/xml",
             ),
         ];
-        for (client, url, expected_claim, expected_content_type) in cases {
+        for (client, url, expected_claim, expected_user_agent, expected_content_type) in cases {
             let request = client.post(url).unwrap().build().unwrap();
             assert_eq!(request.url().as_str(), url);
             assert_eq!(request.headers()["x-mme-client-info"], expected_claim);
+            assert_eq!(request.headers()["user-agent"], expected_user_agent);
             assert_eq!(request.headers()["content-type"], expected_content_type);
             assert_eq!(request.headers()["accept"], "text/x-xml-plist");
         }
@@ -561,6 +582,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(sms.headers()["x-mme-client-info"], LOCAL_ANDROID_CLIENT_INFO);
+        assert_eq!(sms.headers()["user-agent"], login.client_info.user_agent.as_str());
         assert_eq!(sms.headers()["content-type"], "application/json");
     }
 
@@ -610,6 +632,7 @@ mod tests {
     fn external_provider_keeps_its_claim_and_legacy_transport_for_all_stages() {
         let claim = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29>";
         let login = client(claim, false);
+        assert!(Arc::ptr_eq(&login, &login.xcode_token_client()));
         assert!(Arc::ptr_eq(&login, &login.developer_client()));
         assert!(Arc::ptr_eq(&login, &login.provisioning_client()));
         let sign_in_url = login.get_url("gsService").unwrap();

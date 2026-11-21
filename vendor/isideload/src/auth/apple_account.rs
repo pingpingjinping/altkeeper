@@ -1013,7 +1013,7 @@ impl AppleAccount {
         });
 
         let client = if app == "com.apple.gs.xcode.auth" {
-            self.grandslam_client.developer_client()
+            self.grandslam_client.xcode_token_client()
         } else {
             self.grandslam_client.clone()
         };
