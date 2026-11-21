@@ -995,7 +995,12 @@ impl AppleAccount {
             .to_vec();
 
         let gs_service_url = self.grandslam_client.get_url("gsService")?;
-        let cpd = anisette_data.get_client_provided_data();
+        let is_xcode_token = app == "com.apple.gs.xcode.auth";
+        let cpd = if is_xcode_token && self.grandslam_client.is_local_android() {
+            anisette_data.local_xcode_token_client_provided_data(web_time::SystemTime::now())
+        } else {
+            anisette_data.get_client_provided_data()
+        };
 
         let request = plist!(dict {
             "Header": {
@@ -1012,8 +1017,8 @@ impl AppleAccount {
             }
         });
 
-        let client = if app == "com.apple.gs.xcode.auth" {
-            self.grandslam_client.xcode_token_client()
+        let client = if is_xcode_token {
+            self.grandslam_client.developer_client()
         } else {
             self.grandslam_client.clone()
         };

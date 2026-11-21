@@ -33,9 +33,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
-      - name: Check GrandSlam request headers for the token experiment
+      - name: Check vendored authentication for the token experiment
         if: github.ref_name == 'test/local-anisette-xcode-token'
-        run: cargo test --locked -p isideload --lib auth::grandslam::tests
+        run: cargo test --locked -p isideload --lib
       - name: Check English CLI help
         run: |
           ALTKEEPER_LANG=en cargo run --locked -- --help | grep '^usage: altkeeper'

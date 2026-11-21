@@ -107,6 +107,23 @@ impl AnisetteData {
         cpd
     }
 
+    /// Add the provider's routing info and the current time for the local Xcode token request.
+    pub(crate) fn local_xcode_token_client_provided_data(
+        &self,
+        request_time: SystemTime,
+    ) -> Dictionary {
+        let mut cpd = self.get_client_provided_data();
+        if !self.routing_info.trim().is_empty() {
+            cpd.insert("X-Apple-I-MD-RINFO".into(), self.routing_info.clone().into());
+        }
+        if let Ok(elapsed) = request_time.duration_since(web_time::UNIX_EPOCH) {
+            let seconds = std::time::Duration::from_secs(elapsed.as_secs());
+            let timestamp = plist::Date::from(std::time::UNIX_EPOCH + seconds).to_xml_format();
+            cpd.insert("X-Apple-I-Client-Time".into(), timestamp.into());
+        }
+        cpd
+    }
+
     pub fn needs_refresh(&self) -> bool {
         let elapsed = self.generated_at.elapsed();
         match elapsed {
@@ -116,6 +133,35 @@ impl AnisetteData {
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_xcode_token_body_adds_provider_routing_info_and_utc_request_time() {
+        let request_time = web_time::UNIX_EPOCH + web_time::Duration::from_millis(1_700_000_000_999);
+        let data = AnisetteData {
+            machine_id: "machine-id".into(),
+            one_time_password: "otp".into(),
+            routing_info: "17106176".into(),
+            _device_description: "device".into(),
+            device_unique_identifier: "device-id".into(),
+            _local_user_id: "local-user-id".into(),
+            generated_at: request_time - web_time::Duration::from_secs(30),
+        };
+        let mut token_data = data.local_xcode_token_client_provided_data(request_time);
+        assert_eq!(
+            token_data.remove("X-Apple-I-MD-RINFO"),
+            Some("17106176".into())
+        );
+        assert_eq!(
+            token_data.remove("X-Apple-I-Client-Time"),
+            Some("2023-11-14T22:13:20Z".into())
+        );
+        assert_eq!(token_data, data.get_client_provided_data());
     }
 }
 
