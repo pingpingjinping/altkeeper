@@ -30,6 +30,11 @@ const GSD_SIGN_IN_URL: &str = "https://gsd.apple.com/grandslam/GsService2/";
 const PLIST_MEDIA_TYPE: &str = "text/x-xml-plist";
 const MAC_CLIENT_INFO: &str =
     "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+// Experimental local developer identity, isolated from external URL lookup.
+// See nab138/iloader#1203 and #1304 for the November authentication reports.
+const LOCAL_DEVELOPER_CLIENT_INFO: &str =
+    "<MacBookAir10,1> <Mac OS X;27.3;26C5035r> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+const LOCAL_DEVELOPER_USER_AGENT: &str = "akd/1.0 CFNetwork/3896.300.31 Darwin/27.3.0";
 
 /// Con ALTKEEPER_DEBUG (o la vecchia ALTREFRESH_DEBUG) impostata, stampa su stderr come risponde Apple a ogni richiesta:
 /// stato, versione HTTP, intestazioni e, se è un errore, il corpo. Mai il corpo di una richiesta
@@ -89,7 +94,8 @@ impl GrandSlam {
     pub(crate) fn developer_client(self: &Arc<Self>) -> Arc<Self> {
         if self.is_local_android() {
             let mut client = self.as_ref().clone();
-            client.client_info.client_info = MAC_CLIENT_INFO.to_owned();
+            client.client_info.client_info = LOCAL_DEVELOPER_CLIENT_INFO.to_owned();
+            client.client_info.user_agent = LOCAL_DEVELOPER_USER_AGENT.to_owned();
             Arc::new(client)
         } else {
             self.clone()
@@ -537,7 +543,7 @@ mod tests {
             (
                 developer.as_ref(),
                 token_url.as_str(),
-                MAC_CLIENT_INFO,
+                LOCAL_DEVELOPER_CLIENT_INFO,
                 "text/xml; charset=UTF-8",
             ),
             (
@@ -554,6 +560,13 @@ mod tests {
             assert_eq!(request.headers()["content-type"], expected_content_type);
             assert_eq!(request.headers()["accept"], "text/x-xml-plist");
         }
+
+        assert_eq!(
+            developer.request_headers(false).unwrap()["user-agent"],
+            LOCAL_DEVELOPER_USER_AGENT
+        );
+        assert_eq!(provision.client_info.user_agent, login.client_info.user_agent);
+        assert!(LOCAL_DEVELOPER_CLIENT_INFO.contains("<Mac OS X;"));
 
         let sms = login
             .put_sms("https://gsa.apple.com/")
@@ -572,7 +585,7 @@ mod tests {
         let external_claim = "<MacBookPro13,3> <Mac OS X;10.12.6;16G29>";
         let local = client(LOCAL_ANDROID_CLIENT_INFO, true).developer_client();
         let external = client(external_claim, false).developer_client();
-        for (developer, expected_claim) in [(local, MAC_CLIENT_INFO), (external, external_claim)] {
+        for (developer, expected_claim) in [(local, LOCAL_DEVELOPER_CLIENT_INFO), (external, external_claim)] {
             let request = developer.post_developer_plist(&url).unwrap().build().unwrap();
             assert_eq!(request.method(), reqwest::Method::POST);
             assert_eq!(request.url().as_str(), url);
